@@ -11,14 +11,13 @@ from pathlib import Path
 # =========================================================
 # ファイルパス設定 (Botのルートディレクトリを参照し、自動生成をサポート)
 # =========================================================
-# cogs/ticket.py が 'cogs' フォルダ内にあることを前提とし、親の親ディレクトリ（ルート）を参照
 BASE_DIR = Path(__file__).parent.parent.parent 
-# Botのルートディレクトリにファイルを保存する
 TICKET_DATA_FILE = BASE_DIR / "ticket_data.json"
 TICKET_PANEL_SETTINGS_FILE = BASE_DIR / "ticket_panel_settings.json" 
 
 # =========================================================
 # ヘルパー関数とデータ管理
+# (変更なし: _load_json, _save_json, create_error_embed, _update_channel_name)
 # =========================================================
 def _load_json(file_path: Path):
     """JSONファイルからデータを読み込む (存在しない場合は自動生成し、空の辞書を返す)"""
@@ -88,6 +87,8 @@ async def _update_channel_name(channel: discord.TextChannel, opener: discord.Mem
 # =========================================================
 # カスタム View (ボタンとセレクトメニュー)
 # =========================================================
+
+# (変更なし: ConfirmRemoveView, HandlerSelectView, ConfirmCloseView, TicketInitialView)
 
 # --- 対応者削除 確認 View ---
 class ConfirmRemoveView(View):
@@ -321,8 +322,10 @@ class TicketInitialView(View):
 
 # --- チケットパネルのボタン ---
 class TicketPanelButton(discord.ui.Button):
-    def __init__(self, label, custom_id):
+    # ★修正点 1: __init__でbotを受け取るように修正★
+    def __init__(self, bot: commands.Bot, label, custom_id):
         super().__init__(label=label, style=ButtonStyle.primary, custom_id=custom_id)
+        self.bot = bot # botインスタンスを保持
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
@@ -353,7 +356,6 @@ class TicketPanelButton(discord.ui.Button):
         if staff_role_id:
             staff_role = interaction.guild.get_role(int(staff_role_id))
             if staff_role:
-                # 対応スタッフロールにチャンネル閲覧・メッセージ送信権限を付与
                 overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 
         try:
@@ -366,17 +368,16 @@ class TicketPanelButton(discord.ui.Button):
         except discord.Forbidden:
             return await interaction.followup.send("❌ チャンネルを作成する権限がありません。", ephemeral=True)
 
-        # ★★★ 修正箇所: ウェルカムメッセージがない場合のデフォルト処理 ★★★
+        # ウェルカムメッセージがない場合のデフォルト処理
         if welcome_message and welcome_message.strip():
-            # 歓迎メッセージが設定されている場合
             welcome_embed = discord.Embed(
                 title="🎫 チケットが開かれました",
                 description=f"ようこそ、{interaction.user.mention} 様。\n{welcome_message}",
                 color=discord.Color.green()
             )
-            content = interaction.user.mention # 作成者へのメンションをコンテンツに入れる
+            content = interaction.user.mention 
         else:
-            # 歓迎メッセージが設定されていない場合 (ユーザーの要望)
+            # デフォルトメッセージ (ご要望通り)
             staff_mention = f"<@&{staff_role_id}>" if staff_role_id else "**対応スタッフ**"
             welcome_embed = discord.Embed(
                 title="🎫 対応者をお待ちください",
@@ -386,9 +387,9 @@ class TicketPanelButton(discord.ui.Button):
                 ),
                 color=discord.Color.orange()
             )
-            content = f"{staff_mention} {interaction.user.mention}" # メンションをコンテンツに入れる (通知を確実に送るため)
+            content = f"{staff_mention} {interaction.user.mention}" 
 
-        # ★★★ 修正箇所: チケットデータ保存とViewの送信は常に実行 ★★★
+        # チケットデータ保存
         global ticket_data
         ticket_data[str(new_channel.id)] = {
             "opener_id": str(interaction.user.id),
@@ -397,6 +398,7 @@ class TicketPanelButton(discord.ui.Button):
         _save_json(TICKET_DATA_FILE, ticket_data)
 
         # チケット操作View (ボタン群) を送信
+        # ★修正点 2: TicketInitialViewにself.botを渡すことで、AttributeErrorを解消★
         await new_channel.send(
             content=content,
             embed=welcome_embed,
@@ -412,12 +414,10 @@ class TicketPanelButton(discord.ui.Button):
 class TicketCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # 永続Viewの復元のため、常にConfirmCloseViewを登録
         self.bot.add_view(ConfirmCloseView(self.bot)) 
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # ⚠️ コマンド同期処理: 起動時にグローバルおよび全ギルドで同期
         try:
             for guild in self.bot.guilds:
                 await self.bot.tree.sync(guild=guild)
@@ -426,20 +426,19 @@ class TicketCog(commands.Cog):
         except Exception as e:
             print(f"ERROR: Failed to sync slash commands: {e}")
 
-        # Bot再起動時、永続的なボタンを復元
         global panel_settings
         panel_settings = _load_json(TICKET_PANEL_SETTINGS_FILE) 
 
+        # ★修正点 3: 永続View復元時、TicketPanelButtonの初期化にself.botを渡す★
         for guild_id, settings in panel_settings.items():
             label = settings.get("label", "🎫 チケットを作成")
             custom_id = f"ticket_create_button_{guild_id}"
             
-            # チケットパネルボタンのViewを復元
             view = View(timeout=None)
-            view.add_item(TicketPanelButton(label, custom_id=custom_id))
+            # self.botを渡す
+            view.add_item(TicketPanelButton(self.bot, label, custom_id=custom_id)) 
             self.bot.add_view(view)
 
-            # チケット操作View (チャンネル内ボタン) の復元
             staff_role_id = settings.get("staff_role_id")
             global ticket_data
             ticket_data = _load_json(TICKET_DATA_FILE)
@@ -448,7 +447,7 @@ class TicketCog(commands.Cog):
                      self.bot.add_view(TicketInitialView(self.bot, data["opener_id"], staff_role_id))
 
 
-    # --- /ticket コマンド (パネル設置) ---
+    # --- /ticket コマンド (変更なし) ---
     @app_commands.command(
         name="ticket",
         description="チケットパネルを設置します。カテゴリーやロールを指定できます。"
@@ -472,16 +471,15 @@ class TicketCog(commands.Cog):
         description: Optional[str] = "サポートが必要な場合は、下のボタンを押してチケットを作成してください。",
         image: Optional[str] = None,
         label: Optional[str] = "🎫 チケットを作成",
-        welcome: Optional[str] = "" # ★修正点: welcomeのデフォルトを空文字に変更★
+        welcome: Optional[str] = "" 
     ):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
         await interaction.response.defer(ephemeral=True)
 
-        guild_id = str(interaction.guild_id)
+        guild_id = str(interaction.guild.id)
         
-        # ★修正点: 設定を保存する際、welcomeがNoneだった場合に備えて空文字を保存
         panel_settings[guild_id] = {
             "category_id": str(category.id),
             "staff_role_id": str(role.id),
@@ -500,7 +498,8 @@ class TicketCog(commands.Cog):
 
         custom_id = f"ticket_create_button_{guild_id}"
         view = View(timeout=None) 
-        view.add_item(TicketPanelButton(label, custom_id=custom_id))
+        # self.botを渡す
+        view.add_item(TicketPanelButton(self.bot, label, custom_id=custom_id)) 
 
         await interaction.channel.send(embed=embed, view=view)
 
@@ -508,7 +507,6 @@ class TicketCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    # JSONファイルをロードして初期化
     global ticket_data
     global panel_settings
     ticket_data = _load_json(TICKET_DATA_FILE)
