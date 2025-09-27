@@ -9,15 +9,15 @@ from typing import Optional, Dict, Any, List, Union
 from pathlib import Path
 
 # =========================================================
-# ファイルパス設定 (Botのルートディレクトリを参照し、自動生成をサポート)
+# ファイルパス設定
 # =========================================================
+# cogs/ticket.py が 'cogs' フォルダ内にあることを前提とし、ルートディレクトリを参照
 BASE_DIR = Path(__file__).parent.parent.parent 
 TICKET_DATA_FILE = BASE_DIR / "ticket_data.json"
 TICKET_PANEL_SETTINGS_FILE = BASE_DIR / "ticket_panel_settings.json" 
 
 # =========================================================
 # ヘルパー関数とデータ管理
-# (変更なし: _load_json, _save_json, create_error_embed, _update_channel_name)
 # =========================================================
 def _load_json(file_path: Path):
     """JSONファイルからデータを読み込む (存在しない場合は自動生成し、空の辞書を返す)"""
@@ -48,7 +48,7 @@ def _save_json(file_path: Path, data: Dict[str, Any]):
     except Exception as e:
         print(f"Error saving {file_path.name}: {e}")
 
-# 初期ロード (ここでファイルが存在しない場合は自動生成される)
+# 初期ロード
 ticket_data: Dict[str, Dict[str, Union[str, List[str]]]] = _load_json(TICKET_DATA_FILE)
 panel_settings: Dict[str, Dict[str, str]] = _load_json(TICKET_PANEL_SETTINGS_FILE)
 
@@ -88,8 +88,6 @@ async def _update_channel_name(channel: discord.TextChannel, opener: discord.Mem
 # カスタム View (ボタンとセレクトメニュー)
 # =========================================================
 
-# (変更なし: ConfirmRemoveView, HandlerSelectView, ConfirmCloseView, TicketInitialView)
-
 # --- 対応者削除 確認 View ---
 class ConfirmRemoveView(View):
     def __init__(self, bot: commands.Bot, target_id: str, opener_id: str):
@@ -119,6 +117,7 @@ class ConfirmRemoveView(View):
         
         target_member = interaction.guild.get_member(int(self.target_id))
         if target_member:
+            # チャンネルの権限を削除
             await interaction.channel.set_permissions(target_member, overwrite=None) 
 
         await interaction.response.edit_message(
@@ -146,17 +145,20 @@ class HandlerSelectView(View):
         options: List[SelectOption] = []
         # set()を使って重複を削除してから処理
         for handler_id in set(current_handler_ids):
+            # メンバーがサーバーに存在するかチェック
             member = self.bot.get_user(int(handler_id))
-            if member:
+            if member: 
                 options.append(SelectOption(label=member.display_name, value=handler_id))
         
-        self.select_menu = Select(
-            placeholder="削除したい対応者を選択",
-            options=options,
-            custom_id="handler_remove_select"
-        )
-        self.select_menu.callback = self.select_callback
-        self.add_item(self.select_menu)
+        # ★修正点: optionsが1つでもある場合のみセレクトメニューを作成・追加する
+        if options:
+            self.select_menu = Select(
+                placeholder="削除したい対応者を選択",
+                options=options,
+                custom_id="handler_remove_select"
+            )
+            self.select_menu.callback = self.select_callback
+            self.add_item(self.select_menu)
 
     async def select_callback(self, interaction: discord.Interaction):
         selected_id = interaction.data['values'][0]
@@ -299,7 +301,6 @@ class TicketInitialView(View):
     # --- 対応者を削除するボタン ---
     @discord.ui.button(label="対応者を削除する", style=ButtonStyle.secondary, custom_id="ticket_remove_handler")
     async def remove_handler_button(self, interaction: discord.Interaction, button: Button):
-        # ★修正点 1: interaction.response.defer を追加 (ボタンコールバックでは必須)
         await interaction.response.defer(ephemeral=True)
 
         if not await self._check_staff_permission(interaction):
@@ -309,25 +310,29 @@ class TicketInitialView(View):
         global ticket_data
 
         if channel_id not in ticket_data:
-            # followp.send を使用
             return await interaction.followup.send("❌ チケットデータが見つかりません。", ephemeral=True)
 
         handler_ids = ticket_data[channel_id].get("handler_ids", [])
         opener_id = ticket_data[channel_id]["opener_id"]
         
-        # ★修正点 2: handler_idsが空の場合はエラーを返す
         if not handler_ids:
             return await interaction.followup.send("❌ 現在、対応者は登録されていません。", ephemeral=True)
 
-        await interaction.followup.send( # followup.send を使用
+        # ★修正点: HandlerSelectViewを生成し、アイテムがあるか確認 (400 Bad Request対策)
+        handler_view = HandlerSelectView(self.bot, handler_ids, opener_id)
+
+        if not handler_view.children:
+            # 登録IDはあったが、対応するユーザーが全員サーバーに存在しない場合
+            return await interaction.followup.send("❌ 登録されている対応者が見つかりませんでした。データが古い可能性があります。", ephemeral=True)
+
+        await interaction.followup.send( 
             embed=discord.Embed(title="対応者削除", description="削除したい対応者をセレクトメニューから選択してください。", color=discord.Color.blue()),
-            view=HandlerSelectView(self.bot, handler_ids, opener_id),
+            view=handler_view, # 生成したViewを渡す
             ephemeral=True
         )
 
 # --- チケットパネルのボタン ---
 class TicketPanelButton(discord.ui.Button):
-    # ★修正点 1: __init__でbotを受け取るように修正★
     def __init__(self, bot: commands.Bot, label, custom_id):
         super().__init__(label=label, style=ButtonStyle.primary, custom_id=custom_id)
         self.bot = bot # botインスタンスを保持
@@ -341,7 +346,7 @@ class TicketPanelButton(discord.ui.Button):
             
         category_id = settings.get("category_id")
         staff_role_id = settings.get("staff_role_id")
-        welcome_message = settings.get("welcome_message", "") # 空文字として取得
+        welcome_message = settings.get("welcome_message", "") 
 
         
         category = interaction.guild.get_channel(int(category_id))
@@ -403,7 +408,6 @@ class TicketPanelButton(discord.ui.Button):
         _save_json(TICKET_DATA_FILE, ticket_data)
 
         # チケット操作View (ボタン群) を送信
-        # ★修正点 2: TicketInitialViewにself.botを渡すことで、AttributeErrorを解消★
         await new_channel.send(
             content=content,
             embed=welcome_embed,
@@ -434,16 +438,17 @@ class TicketCog(commands.Cog):
         global panel_settings
         panel_settings = _load_json(TICKET_PANEL_SETTINGS_FILE) 
 
-        # ★修正点 3: 永続View復元時、TicketPanelButtonの初期化にself.botを渡す★
+        # Bot再起動時、永続的なボタンを復元
         for guild_id, settings in panel_settings.items():
             label = settings.get("label", "🎫 チケットを作成")
             custom_id = f"ticket_create_button_{guild_id}"
             
+            # チケットパネルボタンのViewを復元
             view = View(timeout=None)
-            # self.botを渡す
             view.add_item(TicketPanelButton(self.bot, label, custom_id=custom_id)) 
             self.bot.add_view(view)
 
+            # チケット操作View (チャンネル内ボタン) の復元
             staff_role_id = settings.get("staff_role_id")
             global ticket_data
             ticket_data = _load_json(TICKET_DATA_FILE)
@@ -452,7 +457,7 @@ class TicketCog(commands.Cog):
                      self.bot.add_view(TicketInitialView(self.bot, data["opener_id"], staff_role_id))
 
 
-    # --- /ticket コマンド (変更なし) ---
+    # --- /ticket コマンド (パネル設置) ---
     @app_commands.command(
         name="ticket",
         description="チケットパネルを設置します。カテゴリーやロールを指定できます。"
@@ -481,7 +486,7 @@ class TicketCog(commands.Cog):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
-        # ★修正点 3: deferを冒頭で一度だけ実行。これによりUnknown interactionエラーを解消
+        # ★修正点: deferを冒頭で一度だけ実行。Unknown interactionエラーを解消
         await interaction.response.defer(ephemeral=True)
 
         guild_id = str(interaction.guild.id)
@@ -504,11 +509,12 @@ class TicketCog(commands.Cog):
 
         custom_id = f"ticket_create_button_{guild_id}"
         view = View(timeout=None) 
-        # self.botを渡す
         view.add_item(TicketPanelButton(self.bot, label, custom_id=custom_id)) 
 
-        await interaction.channel.send(embed=embed, view=view)
+        # followup.sendを使ってメッセージを送信 (ephemeral=Falseでチャンネルに表示)
+        await interaction.followup.send(embed=embed, view=view, ephemeral=False)
 
+        # 完了メッセージをfollowup.sendを使って送信
         await interaction.followup.send("✅ チケットパネルを正常に設置しました。Botを再起動してもボタンは機能し続けます。", ephemeral=True)
 
 

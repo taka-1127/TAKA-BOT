@@ -7,6 +7,7 @@ import os
 import asyncio
 import shutil
 import re 
+import glob
 from typing import Dict, Any, Optional
 
 # ffmpeg の有無を判定
@@ -17,8 +18,6 @@ FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
 # =========================================================
 
 class TimeSelectionView(discord.ui.View):
-    # (変更なし)
-
     def __init__(self, format_type: str, url: str, max_duration: str = None):
         super().__init__(timeout=60)
         self.format_type = format_type
@@ -44,8 +43,6 @@ class TimeSelectionView(discord.ui.View):
 
 # --- TimeInputModal (時間指定用のモーダル) ---
 class TimeInputModal(discord.ui.Modal):
-    # (変更なし)
-    
     def __init__(self, format_type: str, url: str, max_duration: str):
         super().__init__(title="ダウンロード時間指定")
         self.format_type = format_type
@@ -79,19 +76,63 @@ class TimeInputModal(discord.ui.Modal):
         
         cog = interaction.client.get_cog('YouTubeCog')
         if cog:
-            # start_time, end_timeに None も許容
             await cog.start_direct_download(interaction, self.format_type, self.url, start_time=selected_start, end_time=selected_end)
 
 
-# ----------------------------------
-# (省略: YouTubeCogクラス内)
-# ----------------------------------
+# =========================================================
+# Discord コグ
+# =========================================================
+class YouTubeCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        print("INFO: Attempting to sync YouTube slash commands...")
+        try:
+            for guild in self.bot.guilds:
+                # ギルド単位でのコマンド同期は時間がかかるため、通常はグローバル同期で十分
+                # await self.bot.tree.sync(guild=guild)
+                pass
+            await self.bot.tree.sync() 
+            print("INFO: YouTube slash commands synced successfully across all guilds.")
+        except Exception as e:
+            print(f"ERROR: Failed to sync YouTube slash commands: {e}")
+            
+    # ヘルパーメソッド (yt-dlpを利用して動画情報を取得する実際のロジック)
+    def _extract_video_info(self, url: str) -> Dict[str, Any]:
+        """動画のタイトル、長さなどを抽出する"""
+        ydl_opts = {
+            'noplaylist': True,
+            'quiet': True,
+            'simulate': True, # ダウンロードはしない
+            'force_generic_extractor': True,
+        }
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            duration_sec = info.get('duration')
+
+            max_duration_text = ""
+            if duration_sec is not None:
+                # 秒を HH:MM:SS 形式に変換
+                h = duration_sec // 3600
+                m = (duration_sec % 3600) // 60
+                s = duration_sec % 60
+                if h > 0:
+                     max_duration_text = f"{h:02d}:{m:02d}:{s:02d}"
+                else:
+                     max_duration_text = f"{m:02d}:{s:02d}"
+            
+            return {
+                "max_duration_text": max_duration_text if max_duration_text else "不明",
+                "title": info.get('title', 'Unknown Title')
+            }
 
     # ヘルパーメソッド (yt-dlpを利用してダウンロードを実行する実際のロジック)
     def _download_video(self, url: str, format_type: str, output_path: str, start_time: Optional[str] = None, end_time: Optional[str] = None) -> Optional[str]:
         """yt-dlpで動画をダウンロードし、最終ファイル名を返す"""
         
-        # フォーマット設定 (変更なし)
+        # フォーマット設定
         if format_type == "mp4":
             format_string = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
             final_ext = 'mp4'
@@ -113,13 +154,11 @@ class TimeInputModal(discord.ui.Modal):
                 'preferredquality': '192',
             })
         
-        # 時間指定のクロッピング設定 (変更なし)
+        # 時間指定のクロッピング設定
         if start_time or end_time:
+            # ffmpegが必須
             if not FFMPEG_AVAILABLE:
                 raise Exception("時間指定ダウンロードには、Botが動作する環境にffmpegが必要です。")
-            
-            # テンポラリフォーマットとしてmp4を優先
-            remux_format = 'mp4' if final_ext == 'mp4' or final_ext == 'mp3' else final_ext
             
             postprocessors.append({
                 'key': 'FFmpegPostProcessor',
@@ -143,22 +182,13 @@ class TimeInputModal(discord.ui.Modal):
             'postprocessors': postprocessors
         }
         
-        temp_dir = os.path.dirname(output_path) # ダウンロードディレクトリ
+        temp_dir = os.path.dirname(output_path)
         
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info_dict = ydl.extract_info(url, download=True)
                 
-                # ★修正点: ダウンロードディレクトリ内のファイルを探索し、最終的なファイル名を見つける
-                import glob
-                
-                # yt-dlpが post-processor を使用した場合、拡張子が変更されることがあるため、
-                # テンポラリディレクトリ内のファイルリストを取得する
-                # basenameに %() プレースホルダーが含まれる場合があるため、ワイルドカードで検索
-                base_name_pattern = output_path.replace('%(title)s', info_dict.get('title', '*'))
-                base_name_pattern = base_name_pattern.replace('%(ext)s', '*')
-                
-                # globでダウンロードディレクトリ内の全ファイルを検索
+                # ★修正済み: ダウンロードディレクトリ内のファイルを探索し、最終的なファイル名を見つける
                 downloaded_files = glob.glob(f"{temp_dir}/*")
                 
                 # 最終的な拡張子を持つファイルを探す
@@ -167,8 +197,10 @@ class TimeInputModal(discord.ui.Modal):
                          return f
                 
                 # 見つからなかった場合は、ダウンロードディレクトリ内の最初のファイルを返す（最後の手段）
-                if downloaded_files and os.path.getsize(downloaded_files[0]) > 0:
-                     return downloaded_files[0]
+                if downloaded_files:
+                     first_file = downloaded_files[0]
+                     if os.path.getsize(first_file) > 0:
+                        return first_file
 
                 return None 
                 
@@ -177,54 +209,23 @@ class TimeInputModal(discord.ui.Modal):
             raise Exception(f"ダウンロードに失敗しました。ファイルが公開されているか確認してください。")
 
 
-    # --- コマンド ---
-    @app_commands.command(
-        name="youtube-dl",
-        description="YouTube動画をダウンロードしてファイルまたはリンクで送付します。"
-    )
-    @app_commands.describe(
-        url="ダウンロードしたいYouTube動画のURL",
-        format_type="ダウンロード形式を選択"
-    )
-    @app_commands.choices(format_type=[
-        app_commands.Choice(name="動画 (mp4)", value="mp4"),
-        app_commands.Choice(name="音声 (mp3)", value="mp3"),
-        app_commands.Choice(name="音声 (m4a)", value="m4a"),
-    ])
-    async def youtube_download(self, interaction: discord.Interaction, url: str, format_type: str):
-        await interaction.response.defer(ephemeral=True)
-
-        try:
-            info = await asyncio.to_thread(self._extract_video_info, url)
-            max_duration_text = info.get("max_duration_text")
-            
-            if max_duration_text:
-                embed = discord.Embed(
-                    title="ダウンロード形式と時間選択",
-                    description=f"動画タイトル: **{info.get('title', '不明なタイトル')}**\n最大動画時間: **{max_duration_text}**\n\nどの範囲をダウンロードしますか？",
-                    color=discord.Color.blue()
-                )
-                view = TimeSelectionView(format_type, url, max_duration_text)
-                
-                await interaction.followup.send(content="⬇ ダウンロード形式と時間を選択してください:", embed=embed, view=view, ephemeral=True)
-            else:
-                await self.start_direct_download(interaction, format_type, url)
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ 動画情報の取得中にエラーが発生しました: {str(e)}", ephemeral=True)
-
-    # --- ダウンロード実行ロジック ---
+    # --- ヘルパー: ダウンロード実行とファイル処理 ---
     async def start_direct_download(self, interaction: discord.Interaction, format_type: str, url: str, start_time: str = None, end_time: str = None):
+        # 一時ディレクトリの作成
         temp_dir = f"temp_dl_{interaction.id}"
         os.makedirs(temp_dir, exist_ok=True)
-        filename = None
         
         try:
-            await interaction.edit_original_response(content="⏳ ダウンロードを開始しています...")
+            if not os.path.isdir(temp_dir):
+                 await interaction.edit_original_response(content="❌ ダウンロード用の一時フォルダ作成に失敗しました。")
+                 return
+                 
+            await interaction.edit_original_response(content="⏳ ダウンロードを開始します...")
 
+            # yt-dlpに渡す出力パス
             output_path = os.path.join(temp_dir, "%(title)s.%(ext)s")
             
-            # _download_videoを呼び出す
+            # 同期処理である _download_video を非同期で実行
             filename = await asyncio.to_thread(
                 self._download_video, 
                 url, 
@@ -235,25 +236,47 @@ class TimeInputModal(discord.ui.Modal):
             )
             
             if not filename or not os.path.exists(filename):
-                return await interaction.edit_original_response(content="❌ ダウンロードに失敗しました。ファイルが生成されませんでした。")
+                raise Exception("ダウンロードされたファイルが見つかりませんでした。")
 
             file_size_mb = os.path.getsize(filename) / (1024 * 1024)
             
-            # Gofileにアップロード
-            await self.upload_to_gofile_for_interaction(interaction, filename, file_size_mb)
+            # Discordアップロード制限 (ここでは25MBを仮定)
+            DISCORD_MAX_SIZE_MB = 25 
+
+            if file_size_mb > DISCORD_MAX_SIZE_MB:
+                # Gofile経由でのアップロード
+                max_duration = "" # 情報がないため空
+                await self.upload_to_gofile_for_interaction(interaction, filename, file_size_mb, max_duration)
+            else:
+                # Discordに直接アップロード
+                await interaction.edit_original_response(content=f"✅ ダウンロード完了。Discordにアップロード中... ({file_size_mb:.1f}MB)")
+                
+                # アップロード時にファイル名を調整
+                discord_filename = os.path.basename(filename) 
+                
+                await interaction.channel.send(
+                    content=f"📥 {interaction.user.mention} 様のご要望のファイルです。",
+                    file=discord.File(filename, filename=discord_filename)
+                )
+                await interaction.delete_original_response()
 
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ ダウンロード/処理中にエラーが発生しました: {str(e)}")
+            error_message = f"❌ **処理中にエラーが発生しました。**\n```{e}```"
+            try:
+                # original_responseがない場合があるため、try-except
+                await interaction.edit_original_response(content=error_message)
+            except:
+                 await interaction.followup.send(content=error_message, ephemeral=True)
+                 
         finally:
-            # ★修正点: finallyブロックでtemp_dir全体を確実に削除
+            # ★修正済み: finallyブロックでtemp_dir全体を確実に削除
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
-
-    async def upload_to_gofile_for_interaction(self, interaction: discord.Interaction, filename, file_size_mb):
-        # (変更なし)
+    async def upload_to_gofile_for_interaction(self, interaction: discord.Interaction, filename, file_size_mb, max_duration):
         await interaction.edit_original_response(content=f"📤 アップロード中です...\n💾 ファイルサイズ: {file_size_mb:.1f}MB")
         try:
+            # requestsは同期処理なのでasyncio.to_threadでラップ
             response = await asyncio.to_thread(
                 requests.post,
                 "https://store1.gofile.io/uploadFile",
@@ -276,5 +299,6 @@ class TimeInputModal(discord.ui.Modal):
             await interaction.edit_original_response(content="❌ アップロード中に予期しないエラーが発生しました。\n管理者にお問い合わせください。")
 
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
+    # ★修正済み: setup関数は正しい
     await bot.add_cog(YouTubeCog(bot))
