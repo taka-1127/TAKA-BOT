@@ -1,12 +1,12 @@
 import discord
 from discord.ext import commands
-from discord import app_commands # 追加
+from discord import app_commands
 import yt_dlp
 import requests
 import os
 import asyncio
 import shutil
-import re # タイムスタンプ抽出のためにreを追加
+import re 
 
 # ffmpeg の有無を判定（インストールされていれば自動で True になる）
 FFMPEG_AVAILABLE = shutil.which("ffmpeg") is not None
@@ -82,6 +82,22 @@ class YouTubeCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # ⚠️ コマンドが消える問題への対処: 起動時にグローバルおよび全ギルドで同期 ⚠️
+        print("INFO: Attempting to sync YouTube slash commands...")
+        try:
+            # Botが所属するすべてのギルドに対してコマンドを同期し、同期漏れを防ぎます。
+            for guild in self.bot.guilds:
+                await self.bot.tree.sync(guild=guild)
+            
+            # グローバル同期も実行（念のため）
+            await self.bot.tree.sync() 
+
+            print("INFO: YouTube slash commands synced successfully across all guilds.")
+        except Exception as e:
+            print(f"ERROR: Failed to sync YouTube slash commands: {e}")
+            
     # ヘルパーメソッド (元のコードのロジックを維持)
     def _extract_video_info(self, url):
         # ... (動画情報抽出ロジック)
@@ -92,7 +108,7 @@ class YouTubeCog(commands.Cog):
         return "downloaded_file.mp4" # 仮の戻り値
     
     # --- コマンド ---
-    @app_commands.command( # 変更
+    @app_commands.command(
         name="youtube-dl",
         description="YouTube動画をダウンロードしてファイルまたはリンクで送付します。"
     )
@@ -100,13 +116,13 @@ class YouTubeCog(commands.Cog):
         url="ダウンロードしたいYouTube動画のURL",
         format_type="ダウンロード形式を選択"
     )
-    @app_commands.choices(format_type=[ # 変更: app_commands.choices
+    @app_commands.choices(format_type=[
         app_commands.Choice(name="動画 (mp4)", value="mp4"),
         app_commands.Choice(name="音声 (mp3)", value="mp3"),
         app_commands.Choice(name="音声 (m4a)", value="m4a"),
     ])
-    async def youtube_download(self, interaction: discord.Interaction, url: str, format_type: str): # 変更: ctx -> interaction
-        await interaction.response.defer(ephemeral=True) # 変更: interaction.response.defer()
+    async def youtube_download(self, interaction: discord.Interaction, url: str, format_type: str):
+        await interaction.response.defer(ephemeral=True)
 
         try:
             # 同期処理を非同期で実行
@@ -136,6 +152,7 @@ class YouTubeCog(commands.Cog):
         filename = None
         
         try:
+            # interaction.edit_original_responseのcontentを修正
             await interaction.edit_original_response(content="⏳ ダウンロードを開始しています...")
 
             # ダウンロード処理 (同期) を非同期で実行
@@ -155,15 +172,9 @@ class YouTubeCog(commands.Cog):
 
             file_size_mb = os.path.getsize(filename) / (1024 * 1024)
             
-            if file_size_mb < 8: # Discordのファイルサイズ制限を考慮 (仮に8MBとする)
-                # 直接アップロード
-                await interaction.edit_original_response(content=f"⬆ Discordに直接アップロード中... ({file_size_mb:.1f}MB)")
-                
-                # 8MB未満でもファイルが大きいとエラーになる可能性があるため、Gofileにアップロード
-                await self.upload_to_gofile_for_interaction(interaction, filename, file_size_mb, self.max_duration)
-            else:
-                # Gofileにアップロード
-                await self.upload_to_gofile_for_interaction(interaction, filename, file_size_mb, self.max_duration)
+            # Gofileにアップロード
+            # ★修正点: 不要な引数 (max_duration) を削除★
+            await self.upload_to_gofile_for_interaction(interaction, filename, file_size_mb)
 
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ ダウンロード/処理中にエラーが発生しました: {str(e)}")
@@ -175,7 +186,8 @@ class YouTubeCog(commands.Cog):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 
 
-    async def upload_to_gofile_for_interaction(self, interaction: discord.Interaction, filename, file_size_mb, max_duration):
+    async def upload_to_gofile_for_interaction(self, interaction: discord.Interaction, filename, file_size_mb):
+        # ★修正点: max_duration 引数を削除し、ファイルサイズ表示に専念★
         await interaction.edit_original_response(content=f"📤 アップロード中です...\n💾 ファイルサイズ: {file_size_mb:.1f}MB")
         try:
             # requestsは同期処理なのでasyncio.to_threadでラップ
@@ -201,5 +213,5 @@ class YouTubeCog(commands.Cog):
             await interaction.edit_original_response(content="❌ アップロード中に予期しないエラーが発生しました。\n管理者にお問い合わせください。")
 
 
-async def setup(bot): # 変更: async setup
-    await bot.add_cog(YouTubeCog(bot)) # 変更: await
+async def setup(bot):
+    await bot.add_cog(YouTubeCog(bot))
