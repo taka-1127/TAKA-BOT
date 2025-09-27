@@ -23,19 +23,19 @@ TICKET_PANEL_SETTINGS_FILE = BASE_DIR / "ticket_panel_settings.json"
 def _load_json(file_path: Path):
     """JSONファイルからデータを読み込む (存在しない場合は自動生成し、空の辞書を返す)"""
     if not file_path.exists():
-        # ファイルが存在しない場合、空の辞書を保存し、自動生成する
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump({}, f)
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump({}, f)
+        except Exception as e:
+            print(f"Error creating empty {file_path.name}: {e}")
         return {}
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # JSONが空の場合（ファイルが存在するが中身が空の場合）
             if not data:
                 return {}
             return data
-    except json.JSONDecodeError:
-        # JSONが破損している場合
+    except (json.JSONDecodeError, FileNotFoundError):
         return {}
     except Exception as e:
         print(f"Error loading {file_path.name}: {e}")
@@ -143,6 +143,7 @@ class HandlerSelectView(View):
         self.opener_id = opener_id
         
         options: List[SelectOption] = []
+        # set()を使って重複を削除してから処理
         for handler_id in set(current_handler_ids):
             member = self.bot.get_user(int(handler_id))
             if member:
@@ -173,7 +174,7 @@ class HandlerSelectView(View):
 # --- 閉じる確認 View ---
 class ConfirmCloseView(View):
     def __init__(self, bot: commands.Bot):
-        super().__init__(timeout=None) # 永続 View
+        super().__init__(timeout=None) 
         self.bot = bot
 
     @discord.ui.button(label="👍はい", style=ButtonStyle.green, custom_id="confirm_close_yes")
@@ -272,6 +273,7 @@ class TicketInitialView(View):
         handler_ids = ticket_data[channel_id].get("handler_ids", [])
         opener_id = ticket_data[channel_id]["opener_id"]
 
+        # 対応者に追加したらチャンネルを見れるようにする
         await interaction.channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
         
         if user_id in handler_ids:
@@ -331,7 +333,8 @@ class TicketPanelButton(discord.ui.Button):
             
         category_id = settings.get("category_id")
         staff_role_id = settings.get("staff_role_id")
-        welcome_message = settings.get("welcome_message", "ご用件をお聞かせください。")
+        welcome_message = settings.get("welcome_message", "") # 空文字として取得
+
         
         category = interaction.guild.get_channel(int(category_id))
         if not category or category.type != ChannelType.category:
@@ -350,6 +353,7 @@ class TicketPanelButton(discord.ui.Button):
         if staff_role_id:
             staff_role = interaction.guild.get_role(int(staff_role_id))
             if staff_role:
+                # 対応スタッフロールにチャンネル閲覧・メッセージ送信権限を付与
                 overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 
         try:
@@ -362,12 +366,29 @@ class TicketPanelButton(discord.ui.Button):
         except discord.Forbidden:
             return await interaction.followup.send("❌ チャンネルを作成する権限がありません。", ephemeral=True)
 
-        welcome_embed = discord.Embed(
-            title="🎫 チケットが開かれました",
-            description=f"ようこそ、{interaction.user.mention} 様。\n{welcome_message}",
-            color=discord.Color.green()
-        )
-        
+        # ★★★ 修正箇所: ウェルカムメッセージがない場合のデフォルト処理 ★★★
+        if welcome_message and welcome_message.strip():
+            # 歓迎メッセージが設定されている場合
+            welcome_embed = discord.Embed(
+                title="🎫 チケットが開かれました",
+                description=f"ようこそ、{interaction.user.mention} 様。\n{welcome_message}",
+                color=discord.Color.green()
+            )
+            content = interaction.user.mention # 作成者へのメンションをコンテンツに入れる
+        else:
+            # 歓迎メッセージが設定されていない場合 (ユーザーの要望)
+            staff_mention = f"<@&{staff_role_id}>" if staff_role_id else "**対応スタッフ**"
+            welcome_embed = discord.Embed(
+                title="🎫 対応者をお待ちください",
+                description=(
+                    f"対応者がくるまでお待ちください。\n"
+                    f"{staff_mention} {interaction.user.mention}"
+                ),
+                color=discord.Color.orange()
+            )
+            content = f"{staff_mention} {interaction.user.mention}" # メンションをコンテンツに入れる (通知を確実に送るため)
+
+        # ★★★ 修正箇所: チケットデータ保存とViewの送信は常に実行 ★★★
         global ticket_data
         ticket_data[str(new_channel.id)] = {
             "opener_id": str(interaction.user.id),
@@ -375,7 +396,9 @@ class TicketPanelButton(discord.ui.Button):
         }
         _save_json(TICKET_DATA_FILE, ticket_data)
 
+        # チケット操作View (ボタン群) を送信
         await new_channel.send(
+            content=content,
             embed=welcome_embed,
             view=TicketInitialView(self.bot, str(interaction.user.id), staff_role_id)
         )
@@ -389,15 +412,17 @@ class TicketPanelButton(discord.ui.Button):
 class TicketCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.bot.add_view(ConfirmCloseView(self.bot))
+        # 永続Viewの復元のため、常にConfirmCloseViewを登録
+        self.bot.add_view(ConfirmCloseView(self.bot)) 
 
     @commands.Cog.listener()
     async def on_ready(self):
-        # ⚠️ コマンドが消える問題への対処: 起動時にグローバルに同期 ⚠️
+        # ⚠️ コマンド同期処理: 起動時にグローバルおよび全ギルドで同期
         try:
-            # ギルドIDを指定しないグローバル同期
+            for guild in self.bot.guilds:
+                await self.bot.tree.sync(guild=guild)
             await self.bot.tree.sync() 
-            print("INFO: Slash commands synced globally.")
+            print("INFO: Slash commands synced successfully.")
         except Exception as e:
             print(f"ERROR: Failed to sync slash commands: {e}")
 
@@ -409,10 +434,12 @@ class TicketCog(commands.Cog):
             label = settings.get("label", "🎫 チケットを作成")
             custom_id = f"ticket_create_button_{guild_id}"
             
+            # チケットパネルボタンのViewを復元
             view = View(timeout=None)
             view.add_item(TicketPanelButton(label, custom_id=custom_id))
             self.bot.add_view(view)
 
+            # チケット操作View (チャンネル内ボタン) の復元
             staff_role_id = settings.get("staff_role_id")
             global ticket_data
             ticket_data = _load_json(TICKET_DATA_FILE)
@@ -445,7 +472,7 @@ class TicketCog(commands.Cog):
         description: Optional[str] = "サポートが必要な場合は、下のボタンを押してチケットを作成してください。",
         image: Optional[str] = None,
         label: Optional[str] = "🎫 チケットを作成",
-        welcome: Optional[str] = "ご用件をお聞かせください。"
+        welcome: Optional[str] = "" # ★修正点: welcomeのデフォルトを空文字に変更★
     ):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
@@ -453,10 +480,12 @@ class TicketCog(commands.Cog):
         await interaction.response.defer(ephemeral=True)
 
         guild_id = str(interaction.guild_id)
+        
+        # ★修正点: 設定を保存する際、welcomeがNoneだった場合に備えて空文字を保存
         panel_settings[guild_id] = {
             "category_id": str(category.id),
             "staff_role_id": str(role.id),
-            "welcome_message": welcome,
+            "welcome_message": welcome if welcome is not None else "", 
             "label": label
         }
         _save_json(TICKET_PANEL_SETTINGS_FILE, panel_settings)
@@ -469,7 +498,6 @@ class TicketCog(commands.Cog):
         if image:
             embed.set_image(url=image)
 
-        # 既存のビューがあれば削除し、新しいビューを登録し直すことで重複を防ぐ
         custom_id = f"ticket_create_button_{guild_id}"
         view = View(timeout=None) 
         view.add_item(TicketPanelButton(label, custom_id=custom_id))
