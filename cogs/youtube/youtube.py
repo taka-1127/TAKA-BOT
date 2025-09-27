@@ -83,65 +83,24 @@ class TimeInputModal(discord.ui.Modal):
             await cog.start_direct_download(interaction, self.format_type, self.url, start_time=selected_start, end_time=selected_end)
 
 
-# =========================================================
-# Discord コグ
-# =========================================================
-class YouTubeCog(commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-
-    @commands.Cog.listener()
-    async def on_ready(self):
-        # (コマンド同期処理は変更なし)
-        print("INFO: Attempting to sync YouTube slash commands...")
-        try:
-            for guild in self.bot.guilds:
-                await self.bot.tree.sync(guild=guild)
-            await self.bot.tree.sync() 
-            print("INFO: YouTube slash commands synced successfully across all guilds.")
-        except Exception as e:
-            print(f"ERROR: Failed to sync YouTube slash commands: {e}")
-            
-    # ヘルパーメソッド (yt-dlpを利用して動画情報を取得する実際のロジック)
-    def _extract_video_info(self, url: str) -> Dict[str, Any]:
-        """動画のタイトル、長さなどを抽出する"""
-        ydl_opts = {
-            'noplaylist': True,
-            'quiet': True,
-            'simulate': True, # ダウンロードはしない
-            'force_generic_extractor': True,
-        }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            duration_sec = info.get('duration')
-
-            max_duration_text = ""
-            if duration_sec is not None:
-                # 秒を HH:MM:SS 形式に変換
-                h = duration_sec // 3600
-                m = (duration_sec % 3600) // 60
-                s = duration_sec % 60
-                if h > 0:
-                     max_duration_text = f"{h:02d}:{m:02d}:{s:02d}"
-                else:
-                     max_duration_text = f"{m:02d}:{s:02d}"
-            
-            return {
-                "max_duration_text": max_duration_text if max_duration_text else "不明",
-                "title": info.get('title', 'Unknown Title')
-            }
+# ----------------------------------
+# (省略: YouTubeCogクラス内)
+# ----------------------------------
 
     # ヘルパーメソッド (yt-dlpを利用してダウンロードを実行する実際のロジック)
     def _download_video(self, url: str, format_type: str, output_path: str, start_time: Optional[str] = None, end_time: Optional[str] = None) -> Optional[str]:
         """yt-dlpで動画をダウンロードし、最終ファイル名を返す"""
         
-        # フォーマット設定
+        # フォーマット設定 (変更なし)
         if format_type == "mp4":
             format_string = 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
+            final_ext = 'mp4'
         elif format_type == "mp3":
             format_string = 'bestaudio/best'
+            final_ext = 'mp3'
         elif format_type == "m4a":
             format_string = 'bestaudio[ext=m4a]/best'
+            final_ext = 'm4a'
         else:
             raise ValueError("無効なフォーマットタイプ")
 
@@ -154,17 +113,14 @@ class YouTubeCog(commands.Cog):
                 'preferredquality': '192',
             })
         
-        # 時間指定のクロッピング設定
+        # 時間指定のクロッピング設定 (変更なし)
         if start_time or end_time:
-            # ffmpegが必須
             if not FFMPEG_AVAILABLE:
                 raise Exception("時間指定ダウンロードには、Botが動作する環境にffmpegが必要です。")
             
-            # 時間指定のポストプロセッサーを追加
-            postprocessors.append({
-                'key': 'FFmpegVideoRemuxer',
-                'preferedformat': format_type if format_type == "mp4" else 'mp4', # クロッピングは通常mp4かそのまま
-            })
+            # テンポラリフォーマットとしてmp4を優先
+            remux_format = 'mp4' if final_ext == 'mp4' or final_ext == 'mp3' else final_ext
+            
             postprocessors.append({
                 'key': 'FFmpegPostProcessor',
                 'postprocessor_args': [
@@ -172,9 +128,12 @@ class YouTubeCog(commands.Cog):
                     *(['-to', end_time] if end_time else []),
                 ],
             })
+            # 時間指定後のファイルが、希望の最終拡張子になるようにremuxerを最後に配置
+            postprocessors.append({
+                'key': 'FFmpegVideoRemuxer',
+                'preferedformat': final_ext,
+            })
         
-        final_ext = format_type if format_type in ["mp3", "m4a"] else 'mp4'
-
         ydl_opts = {
             'format': format_string,
             'outtmpl': output_path,
@@ -184,39 +143,36 @@ class YouTubeCog(commands.Cog):
             'postprocessors': postprocessors
         }
         
+        temp_dir = os.path.dirname(output_path) # ダウンロードディレクトリ
+        
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                # ダウンロードを実行
                 info_dict = ydl.extract_info(url, download=True)
                 
-                # ダウンロードされたファイルのパスを取得
-                base_name = ydl.prepare_filename(info_dict)
-                
-                # 最終的なファイル名 (postprocessorで拡張子が変わる可能性があるため、再構築)
-                final_filename_match = re.search(r'(.*)\.\w+$', base_name)
-                final_filename = f"{final_filename_match.group(1)}.{final_ext}" if final_filename_match else base_name
-                
-                # ydlが最終的に出力したファイル名を探す (厳密なyt-dlpの動作に合わせる)
-                # postprocessorsがある場合、ファイル名は変わる可能性が高い
-                potential_file = final_filename
-
-                # 実際に存在するファイルを探す
+                # ★修正点: ダウンロードディレクトリ内のファイルを探索し、最終的なファイル名を見つける
                 import glob
-                base_path_without_ext = os.path.splitext(base_name)[0]
-                downloaded_files = glob.glob(f"{base_path_without_ext}.*")
-
-                if downloaded_files:
-                     # ダウンロードされたファイルの中で、最終的な拡張子に一致するものがあればそれを返す
-                     for f in downloaded_files:
-                         if f.endswith(f".{final_ext}"):
-                             return f
-                     # なければダウンロードされた最初のファイルを返す
+                
+                # yt-dlpが post-processor を使用した場合、拡張子が変更されることがあるため、
+                # テンポラリディレクトリ内のファイルリストを取得する
+                # basenameに %() プレースホルダーが含まれる場合があるため、ワイルドカードで検索
+                base_name_pattern = output_path.replace('%(title)s', info_dict.get('title', '*'))
+                base_name_pattern = base_name_pattern.replace('%(ext)s', '*')
+                
+                # globでダウンロードディレクトリ内の全ファイルを検索
+                downloaded_files = glob.glob(f"{temp_dir}/*")
+                
+                # 最終的な拡張子を持つファイルを探す
+                for f in downloaded_files:
+                     if f.endswith(f".{final_ext}") and os.path.getsize(f) > 0:
+                         return f
+                
+                # 見つからなかった場合は、ダウンロードディレクトリ内の最初のファイルを返す（最後の手段）
+                if downloaded_files and os.path.getsize(downloaded_files[0]) > 0:
                      return downloaded_files[0]
 
                 return None 
                 
         except Exception as e:
-            # エラー発生時のデバッグ情報
             print(f"YT-DLP Error: {e}")
             raise Exception(f"ダウンロードに失敗しました。ファイルが公開されているか確認してください。")
 
@@ -289,9 +245,7 @@ class YouTubeCog(commands.Cog):
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ ダウンロード/処理中にエラーが発生しました: {str(e)}")
         finally:
-            if filename and os.path.exists(filename):
-                try: os.remove(filename)
-                except: pass
+            # ★修正点: finallyブロックでtemp_dir全体を確実に削除
             if os.path.exists(temp_dir):
                 shutil.rmtree(temp_dir, ignore_errors=True)
 

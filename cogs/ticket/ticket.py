@@ -299,6 +299,9 @@ class TicketInitialView(View):
     # --- 対応者を削除するボタン ---
     @discord.ui.button(label="対応者を削除する", style=ButtonStyle.secondary, custom_id="ticket_remove_handler")
     async def remove_handler_button(self, interaction: discord.Interaction, button: Button):
+        # ★修正点 1: interaction.response.defer を追加 (ボタンコールバックでは必須)
+        await interaction.response.defer(ephemeral=True)
+
         if not await self._check_staff_permission(interaction):
             return
 
@@ -306,15 +309,17 @@ class TicketInitialView(View):
         global ticket_data
 
         if channel_id not in ticket_data:
-            return await interaction.response.send_message(embed=create_error_embed("チケットデータが見つかりません。"), ephemeral=True)
+            # followp.send を使用
+            return await interaction.followup.send("❌ チケットデータが見つかりません。", ephemeral=True)
 
         handler_ids = ticket_data[channel_id].get("handler_ids", [])
         opener_id = ticket_data[channel_id]["opener_id"]
         
+        # ★修正点 2: handler_idsが空の場合はエラーを返す
         if not handler_ids:
-            return await interaction.response.send_message("❌ 現在、対応者は登録されていません。", ephemeral=True)
+            return await interaction.followup.send("❌ 現在、対応者は登録されていません。", ephemeral=True)
 
-        await interaction.response.send_message(
+        await interaction.followup.send( # followup.send を使用
             embed=discord.Embed(title="対応者削除", description="削除したい対応者をセレクトメニューから選択してください。", color=discord.Color.blue()),
             view=HandlerSelectView(self.bot, handler_ids, opener_id),
             ephemeral=True
@@ -476,6 +481,7 @@ class TicketCog(commands.Cog):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
+        # ★修正点 3: deferを冒頭で一度だけ実行。これによりUnknown interactionエラーを解消
         await interaction.response.defer(ephemeral=True)
 
         guild_id = str(interaction.guild.id)
