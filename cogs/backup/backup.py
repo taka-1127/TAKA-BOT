@@ -25,7 +25,7 @@ CLIENT_ID = 1418479907930898463
 CLIENT_SECRET = os.environ.get("CLIENT_SECRET", "GAue03xOW8pnX8h-v2sg8sEsvkAa0Uqd") 
 # ★★★ ⚠️ Renderにデプロイ後、このREDIRECT_URIをあなたのRenderドメインに書き換えてください ★★★
 # 例: https://taka-vending-pro.onrender.com/auth
-REDIRECT_URI = "https://taka-vending-pro.onrender.com/auth" 
+REDIRECT_URI = "https://taka-vending-pro.onrender.com/auth"
 # OAuth2 スコープ (identify: ユーザー情報, guilds.join: サーバーにユーザーを追加)
 SCOPES = "identify guilds.join"
 
