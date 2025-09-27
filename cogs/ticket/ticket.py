@@ -429,8 +429,6 @@ class TicketCog(commands.Cog):
     async def on_ready(self):
         try:
             for guild in self.bot.guilds:
-                # ギルド単位でのコマンド同期は時間がかかるため、通常はグローバル同期で十分
-                # await self.bot.tree.sync(guild=guild) 
                 pass
             await self.bot.tree.sync() 
             print("INFO: Slash commands synced successfully.")
@@ -462,14 +460,14 @@ class TicketCog(commands.Cog):
 
     # --- /ticket コマンド (パネル設置) ---
     @app_commands.command(
-        name="ticket",
+        name="ticket", # コマンド名を /ticket に戻しました
         description="チケットパネルを設置します。カテゴリーやロールを指定できます。"
     )
     @app_commands.describe(
         category="チケットチャンネルを作成するカテゴリー",
-        role="チケット対応スタッフが持つロール（このロールを持つ人のみがボタン操作可）",
+        role="チケット対応スタッフが持つロール",
         title="Embedのタイトル（任意）",
-        description="Embedの説明（小さい文字）（任意）",
+        description="Embedの説明（任意）",
         image="Embedの下部に表示する画像URL（任意）",
         label="ボタンに表示するテキスト（任意）",
         welcome="チケット作成時にチャンネルに送る歓迎メッセージ（任意）"
@@ -490,6 +488,7 @@ class TicketCog(commands.Cog):
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
         # ★修正済み: deferを非エフェメラル（公開）に変更し、パネルが必ず公開されるようにする
+        # ephemeral=Falseがデフォルトのため引数省略可
         await interaction.response.defer() 
 
         guild_id = str(interaction.guild.id)
