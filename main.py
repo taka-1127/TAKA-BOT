@@ -2,7 +2,7 @@
 
 import discord
 from discord.ext import commands
-from discord import app_commands # app_commands モジュールをインポート
+from discord import app_commands 
 import os
 from PayPaython_mobile import PayPay
 import json
@@ -20,14 +20,13 @@ DISCORD_TOKEN = os.getenv("TOKEN")
 
 if not DISCORD_TOKEN:
     print("❌ エラー: .envファイルに 'TOKEN=○○' が設定されていません。")
-    # トークンがない場合は起動せずに終了します
     exit(1)
 
 GUILDS_JSON_PATH = Path(__file__).parent / "guilds.json"
 # ==================================
 
 # IntentsとBotの初期化
-# ★修正: サーバーメンバーの管理（特にバックアップ機能）に必要なIntentsを追加
+# ★修正: メンバーとギルドのIntentsを追加
 intents = discord.Intents.default()
 intents.message_content = True 
 intents.members = True # メンバーIntentsを有効化
@@ -58,7 +57,7 @@ def save_whitelisted_guilds(guild_ids: list):
     with open(GUILDS_JSON_PATH, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=4)
 
-# token.jsonの読み込み（変更なし）
+# token.jsonの読み込み
 token_path = "token.json"
 if os.path.exists(token_path):
     try:
@@ -66,7 +65,6 @@ if os.path.exists(token_path):
             tokens = json.load(f)
         for guild_id_str, access_token in tokens.items():
             try:
-                # PayPayセッションを初期化 (Bot起動時にロード)
                 guild_id = int(guild_id_str)
                 paypay = PayPay(access_token=access_token)
                 bot.user_sessions[guild_id] = paypay
@@ -94,7 +92,7 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # DMでなければプレフィックスコマンドのみ処理
+    # サーバーメッセージの場合、プレフィックスコマンドのみ処理
     if message.guild:
         await bot.process_commands(message)
         return
@@ -188,17 +186,16 @@ async def on_message(message: discord.Message):
 
 
 # ==================================
-# 🔥 修正箇所: 非同期コグ読み込み (setup_hook)
+# 🔥 非同期コグ読み込み (setup_hook)
 # ==================================
 async def setup_cogs():
-    """Botが接続する前にコグを非同期で読み込む（RuntimeWarningを解消）"""
+    """Botが接続する前にコグを非同期で読み込む"""
     print("\nコグを非同期で読み込み中...")
-    # main.pyからの相対パスでcogsフォルダを指定
     base_dir = Path(__file__).parent / "cogs" 
     
     if not base_dir.exists():
         print(f"⚠️ 警告: Cogディレクトリ ({base_dir}) が見つかりませんでした。")
-        return # Cogの読み込みをスキップ
+        return 
 
     def has_setup(fn: Path) -> bool:
         """ファイル内に setup 関数が定義されているかを確認"""
@@ -208,26 +205,21 @@ async def setup_cogs():
             return False
         return ("def setup(" in txt) or ("async def setup(" in txt)
 
-    # フォルダ内を再帰的に検索
     for py in base_dir.rglob("*.py"):
         if py.name == "__init__.py":
             continue
         if not has_setup(py):
             continue
 
-        # cogs/youtube/youtube.py -> cogs.youtube.youtube に変換
         rel = py.relative_to(base_dir).with_suffix("")
         module = "cogs." + ".".join(rel.parts)
         
         try:
-            # 🔥 await を付けて非同期関数を正しく実行
             await bot.load_extension(module) 
             print(f"✅ Cog loaded: {module}")
         except Exception as e:
-            # エラー発生時も他のコグの読み込みは続行
             print(f"❌ Cog load failed: {module} -> {type(e).__name__}: {e}")
 
-# setup_hookとして設定することで on_ready の前に非同期処理が可能になる
 bot.setup_hook = setup_cogs 
 
 # ==================================
