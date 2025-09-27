@@ -197,7 +197,7 @@ class BackupCog(commands.Cog):
         interaction: discord.Interaction, 
         role: discord.Role,
         send_notice: bool, # true/falseで選択
-        title: Optional[str] = "@everyone バックアップ認証のお願い", 
+        title: Optional[str] = "認証", 
         description: Optional[str] = "下のボタンを押して認証してください。", 
         image: Optional[str] = None
     ):
