@@ -6,37 +6,51 @@ import json
 import os
 import asyncio
 from typing import Optional, Dict, Any, List, Union
+from pathlib import Path
 
 # =========================================================
-# ファイルパス設定
+# ファイルパス設定 (Botのルートディレクトリを参照し、自動生成をサポート)
 # =========================================================
-# チケットごとの対応者情報や開いた人を管理
-TICKET_DATA_FILE = "ticket_data.json"
-# チケットパネル設置時の設定（カテゴリー、ロールなど）を保持
-TICKET_PANEL_SETTINGS_FILE = "ticket_panel_settings.json" 
+# cogs/ticket.py が 'cogs' フォルダ内にあることを前提とし、親の親ディレクトリ（ルート）を参照
+BASE_DIR = Path(__file__).parent.parent.parent 
+# Botのルートディレクトリにファイルを保存する
+TICKET_DATA_FILE = BASE_DIR / "ticket_data.json"
+TICKET_PANEL_SETTINGS_FILE = BASE_DIR / "ticket_panel_settings.json" 
 
 # =========================================================
 # ヘルパー関数とデータ管理
 # =========================================================
-def _load_json(file_path):
-    """JSONファイルからデータを読み込む"""
-    if os.path.exists(file_path):
+def _load_json(file_path: Path):
+    """JSONファイルからデータを読み込む (存在しない場合は自動生成し、空の辞書を返す)"""
+    if not file_path.exists():
+        # ファイルが存在しない場合、空の辞書を保存し、自動生成する
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump({}, f)
+        return {}
+    try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            try:
-                return json.load(f)
-            except json.JSONDecodeError:
+            data = json.load(f)
+            # JSONが空の場合（ファイルが存在するが中身が空の場合）
+            if not data:
                 return {}
-    return {}
+            return data
+    except json.JSONDecodeError:
+        # JSONが破損している場合
+        return {}
+    except Exception as e:
+        print(f"Error loading {file_path.name}: {e}")
+        return {}
 
-def _save_json(file_path, data):
+def _save_json(file_path: Path, data: Dict[str, Any]):
     """JSONファイルにデータを保存する"""
-    with open(file_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=4, ensure_ascii=False)
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        print(f"Error saving {file_path.name}: {e}")
 
-# チケットごとの対応者情報を管理する辞書
+# 初期ロード (ここでファイルが存在しない場合は自動生成される)
 ticket_data: Dict[str, Dict[str, Union[str, List[str]]]] = _load_json(TICKET_DATA_FILE)
-
-# パネル設置設定を管理する辞書
 panel_settings: Dict[str, Dict[str, str]] = _load_json(TICKET_PANEL_SETTINGS_FILE)
 
 
@@ -50,22 +64,18 @@ def create_error_embed(description: str) -> discord.Embed:
 
 async def _update_channel_name(channel: discord.TextChannel, opener: discord.Member, handler_ids: List[str]):
     """チャンネル名を更新するロジック"""
-    # チャンネル名に使用できない文字を削除・置換
     safe_opener_name = opener.name.lower().replace(' ', '-').replace('.', '')
     
     handler_name_suffix = ""
     if handler_ids:
-        # ユーザーの要求: 「最後に押した人の名前になる」
         last_handler_id = handler_ids[-1]
         last_handler = channel.guild.get_member(int(last_handler_id))
         if last_handler:
-            # チャンネル名に使用できない文字を削除・置換
             safe_handler_name = last_handler.display_name.lower().replace(' ', '-').replace('.', '')
             handler_name_suffix = f"_{safe_handler_name}"
         
     new_name = f"ticket-{safe_opener_name}{handler_name_suffix}_対応"
     
-    # Discordのチャンネル名の制限 (100文字) を考慮
     if len(new_name) > 100:
         new_name = new_name[:100]
 
@@ -97,21 +107,18 @@ class ConfirmRemoveView(View):
 
         handler_ids = ticket_data[channel_id].get("handler_ids", [])
         
-        # ターゲットIDの全てのインスタンスをリストから削除
         new_handler_ids = [h_id for h_id in handler_ids if h_id != self.target_id]
         
         ticket_data[channel_id]["handler_ids"] = new_handler_ids
         _save_json(TICKET_DATA_FILE, ticket_data)
 
-        # チャンネル名更新
         opener = interaction.guild.get_member(int(self.opener_id))
         if opener:
             await _update_channel_name(interaction.channel, opener, new_handler_ids)
         
-        # チャンネルの権限から削除 (念のため)
         target_member = interaction.guild.get_member(int(self.target_id))
         if target_member:
-            await interaction.channel.set_permissions(target_member, overwrite=None) # 権限をリセット
+            await interaction.channel.set_permissions(target_member, overwrite=None) 
 
         await interaction.response.edit_message(
             embed=discord.Embed(
@@ -136,7 +143,6 @@ class HandlerSelectView(View):
         self.opener_id = opener_id
         
         options: List[SelectOption] = []
-        # 対応者リストから重複を除去してオプションを作成
         for handler_id in set(current_handler_ids):
             member = self.bot.get_user(int(handler_id))
             if member:
@@ -167,7 +173,7 @@ class HandlerSelectView(View):
 # --- 閉じる確認 View ---
 class ConfirmCloseView(View):
     def __init__(self, bot: commands.Bot):
-        super().__init__(timeout=60)
+        super().__init__(timeout=None) # 永続 View
         self.bot = bot
 
     @discord.ui.button(label="👍はい", style=ButtonStyle.green, custom_id="confirm_close_yes")
@@ -181,7 +187,6 @@ class ConfirmCloseView(View):
             view=None
         )
         
-        # チケットデータから削除
         channel_id = str(interaction.channel_id)
         global ticket_data
         if channel_id in ticket_data:
@@ -201,32 +206,40 @@ class ConfirmCloseView(View):
             view=None
         )
 
-# --- チケット操作 View ---
+# --- チケット操作 View (チャンネル内に送信されるボタン) ---
 class TicketInitialView(View):
     def __init__(self, bot: commands.Bot, opener_id: str, staff_role_id: str):
-        super().__init__(timeout=None) # 永続 View
+        super().__init__(timeout=None) 
         self.bot = bot
         self.opener_id = opener_id
         self.staff_role_id = staff_role_id
 
-    async def _check_staff_permission(self, interaction: discord.Interaction) -> bool:
-        """スタッフロールまたはAdmin権限をチェックする"""
-        if not self.staff_role_id:
-            # ロール設定がない場合、Admin権限があればOK
-            if interaction.user.guild_permissions.administrator:
-                return True
-        else:
+    async def _check_staff_permission(self, interaction: discord.Interaction, for_close: bool = False) -> bool:
+        """対応スタッフロールまたはAdmin権限をチェックする"""
+        is_admin = interaction.user.guild_permissions.administrator
+        is_opener = str(interaction.user.id) == self.opener_id
+        is_staff = False
+
+        if self.staff_role_id:
             staff_role = interaction.guild.get_role(int(self.staff_role_id))
             if staff_role and staff_role in interaction.user.roles:
-                return True
+                is_staff = True
         
-        # チャンネル作成者またはAdmin権限でもOK (閉じる操作のため)
-        if str(interaction.user.id) == self.opener_id or interaction.user.guild_permissions.administrator:
+        # 閉じる操作の場合: 作成者、スタッフ、AdminのいずれかであればOK
+        if for_close and (is_admin or is_opener or is_staff):
              return True
-
+        
+        # 対応/削除操作の場合: スタッフ、AdminであればOK
+        if not for_close and (is_admin or is_staff):
+            return True
+        
         # 権限不足の場合
+        error_msg = "この操作を実行するには、**対応スタッフロール**または**管理者権限**が必要です。"
+        if for_close:
+             error_msg = "チケットを閉じるには、**作成者**、**対応スタッフ**または**管理者権限**が必要です。"
+             
         await interaction.response.send_message(
-            embed=create_error_embed("この操作を実行するには、**対応スタッフロール**または**管理者権限**が必要です。"),
+            embed=create_error_embed(error_msg),
             ephemeral=True
         )
         return False
@@ -234,11 +247,9 @@ class TicketInitialView(View):
     # --- 閉じるボタン ---
     @discord.ui.button(label="閉じる", style=ButtonStyle.danger, custom_id="ticket_close")
     async def close_button(self, interaction: discord.Interaction, button: Button):
-        # チャンネル作成者、スタッフ、Adminのいずれかであれば実行可能
-        if not await self._check_staff_permission(interaction):
+        if not await self._check_staff_permission(interaction, for_close=True):
             return
 
-        # 確認Viewを表示
         await interaction.response.send_message(
             embed=discord.Embed(title="⚠️ 本当に閉じますか？", description="この操作は元に戻せません。", color=discord.Color.yellow()),
             view=ConfirmCloseView(self.bot),
@@ -248,7 +259,6 @@ class TicketInitialView(View):
     # --- 対応するボタン ---
     @discord.ui.button(label="このチケットを対応する", style=ButtonStyle.success, custom_id="ticket_handle")
     async def handle_button(self, interaction: discord.Interaction, button: Button):
-        # スタッフまたはAdmin権限が必要
         if not await self._check_staff_permission(interaction):
             return
 
@@ -262,21 +272,15 @@ class TicketInitialView(View):
         handler_ids = ticket_data[channel_id].get("handler_ids", [])
         opener_id = ticket_data[channel_id]["opener_id"]
 
-        # チャンネル権限の更新 (念のため対応者にも閲覧権限を追加)
         await interaction.channel.set_permissions(interaction.user, view_channel=True, send_messages=True)
         
-        # 対応者を追加 (最後に押した人がリストの最後になり、チャンネル名に反映される)
-        if user_id not in handler_ids:
-             handler_ids.append(user_id)
-        else:
-            # 既にいる場合は、その要素を削除してリストの最後に移動させる (最後に押した人にするため)
-            handler_ids.remove(user_id)
-            handler_ids.append(user_id)
+        if user_id in handler_ids:
+            handler_ids.remove(user_id) 
+        handler_ids.append(user_id) 
             
         ticket_data[channel_id]["handler_ids"] = handler_ids
         _save_json(TICKET_DATA_FILE, ticket_data)
 
-        # チャンネル名更新
         opener = interaction.guild.get_member(int(opener_id))
         if opener:
             await _update_channel_name(interaction.channel, opener, handler_ids)
@@ -286,7 +290,6 @@ class TicketInitialView(View):
                 description=f"✅ {interaction.user.mention} 様を対応者に追加しました。\nチャンネル名に反映されています。",
                 color=discord.Color.green()
             ),
-            # この応答はチケットチャンネルで誰もが見えるように
             ephemeral=False 
         )
         
@@ -308,7 +311,6 @@ class TicketInitialView(View):
         if not handler_ids:
             return await interaction.response.send_message("❌ 現在、対応者は登録されていません。", ephemeral=True)
 
-        # 対応者選択メニューを表示
         await interaction.response.send_message(
             embed=discord.Embed(title="対応者削除", description="削除したい対応者をセレクトメニューから選択してください。", color=discord.Color.blue()),
             view=HandlerSelectView(self.bot, handler_ids, opener_id),
@@ -323,10 +325,9 @@ class TicketPanelButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
         
-        # 設定のロード
         settings = panel_settings.get(str(interaction.guild_id))
         if not settings:
-            return await interaction.followup.send("❌ チケットパネルの設定が見つかりません。", ephemeral=True)
+            return await interaction.followup.send("❌ チケットパネルの設定が見つかりません。`/ticket` コマンドで設定してください。", ephemeral=True)
             
         category_id = settings.get("category_id")
         staff_role_id = settings.get("staff_role_id")
@@ -336,15 +337,12 @@ class TicketPanelButton(discord.ui.Button):
         if not category or category.type != ChannelType.category:
             return await interaction.followup.send("❌ 設定されたカテゴリーが見つかりません。", ephemeral=True)
 
-        # チャンネル名 (例: ticket-ユーザー名)
         opener_name = interaction.user.name.lower().replace(' ', '-').replace('.', '')
         
-        # 既存チェック
         for channel in interaction.guild.channels:
             if channel.name.startswith(f"ticket-{opener_name}"):
                 return await interaction.followup.send(f"❌ 既にチケット <#{channel.id}> が開かれています。", ephemeral=True)
 
-        # 権限設定
         overwrites = {
             interaction.guild.default_role: discord.PermissionOverwrite(view_channel=False),
             interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True),
@@ -352,7 +350,6 @@ class TicketPanelButton(discord.ui.Button):
         if staff_role_id:
             staff_role = interaction.guild.get_role(int(staff_role_id))
             if staff_role:
-                # スタッフロールには閲覧・送信権限を付与
                 overwrites[staff_role] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
                 
         try:
@@ -365,14 +362,12 @@ class TicketPanelButton(discord.ui.Button):
         except discord.Forbidden:
             return await interaction.followup.send("❌ チャンネルを作成する権限がありません。", ephemeral=True)
 
-        # 1. 歓迎メッセージ Embed の作成
         welcome_embed = discord.Embed(
             title="🎫 チケットが開かれました",
             description=f"ようこそ、{interaction.user.mention} 様。\n{welcome_message}",
             color=discord.Color.green()
         )
         
-        # 2. チケットデータに初期情報を保存
         global ticket_data
         ticket_data[str(new_channel.id)] = {
             "opener_id": str(interaction.user.id),
@@ -380,7 +375,6 @@ class TicketPanelButton(discord.ui.Button):
         }
         _save_json(TICKET_DATA_FILE, ticket_data)
 
-        # 3. チャンネルにメッセージとボタンを送信
         await new_channel.send(
             embed=welcome_embed,
             view=TicketInitialView(self.bot, str(interaction.user.id), staff_role_id)
@@ -395,28 +389,33 @@ class TicketPanelButton(discord.ui.Button):
 class TicketCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        # 永続Viewを登録 (on_readyで復元)
         self.bot.add_view(ConfirmCloseView(self.bot))
 
     @commands.Cog.listener()
     async def on_ready(self):
+        # ⚠️ コマンドが消える問題への対処: 起動時にグローバルに同期 ⚠️
+        try:
+            # ギルドIDを指定しないグローバル同期
+            await self.bot.tree.sync() 
+            print("INFO: Slash commands synced globally.")
+        except Exception as e:
+            print(f"ERROR: Failed to sync slash commands: {e}")
+
         # Bot再起動時、永続的なボタンを復元
-        settings = _load_json(TICKET_PANEL_SETTINGS_FILE)
-        for guild_id in settings:
-            label = settings[guild_id].get("label", "🎫 チケットを作成")
+        global panel_settings
+        panel_settings = _load_json(TICKET_PANEL_SETTINGS_FILE) 
+
+        for guild_id, settings in panel_settings.items():
+            label = settings.get("label", "🎫 チケットを作成")
             custom_id = f"ticket_create_button_{guild_id}"
             
-            # TicketPanelButtonを含むViewを復元
             view = View(timeout=None)
             view.add_item(TicketPanelButton(label, custom_id=custom_id))
             self.bot.add_view(view)
 
-            # TicketInitialViewも復元 (カスタムIDが動的ではないため)
-            # チャンネル作成時に渡す引数が必要なため、この方法では完全な復元は難しいが、
-            # 少なくともボタンの見た目だけは表示される。
-            # 今回はチャンネル作成時に必要な情報をカスタムIDに含められないため、
-            # コールバック内でデータを再取得する設計になっている。
-            staff_role_id = settings[guild_id].get("staff_role_id")
+            staff_role_id = settings.get("staff_role_id")
+            global ticket_data
+            ticket_data = _load_json(TICKET_DATA_FILE)
             for channel_id, data in ticket_data.items():
                 if self.bot.get_channel(int(channel_id)):
                      self.bot.add_view(TicketInitialView(self.bot, data["opener_id"], staff_role_id))
@@ -453,7 +452,6 @@ class TicketCog(commands.Cog):
             
         await interaction.response.defer(ephemeral=True)
 
-        # 1. 設定の保存
         guild_id = str(interaction.guild_id)
         panel_settings[guild_id] = {
             "category_id": str(category.id),
@@ -463,7 +461,6 @@ class TicketCog(commands.Cog):
         }
         _save_json(TICKET_PANEL_SETTINGS_FILE, panel_settings)
 
-        # 2. パネルEmbedの作成
         embed = discord.Embed(
             title=title,
             description=description,
@@ -472,12 +469,11 @@ class TicketCog(commands.Cog):
         if image:
             embed.set_image(url=image)
 
-        # 3. ボタンViewの作成
-        view = View(timeout=None) # 永続 View
+        # 既存のビューがあれば削除し、新しいビューを登録し直すことで重複を防ぐ
         custom_id = f"ticket_create_button_{guild_id}"
+        view = View(timeout=None) 
         view.add_item(TicketPanelButton(label, custom_id=custom_id))
 
-        # 4. パネルの送信
         await interaction.channel.send(embed=embed, view=view)
 
         await interaction.followup.send("✅ チケットパネルを正常に設置しました。Botを再起動してもボタンは機能し続けます。", ephemeral=True)
@@ -491,5 +487,4 @@ async def setup(bot: commands.Bot):
     panel_settings = _load_json(TICKET_PANEL_SETTINGS_FILE)
     
     await bot.add_cog(TicketCog(bot))
-    # チケット操作 View のカスタムIDを登録
     bot.add_view(ConfirmCloseView(bot))
