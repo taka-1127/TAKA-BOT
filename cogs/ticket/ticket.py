@@ -150,7 +150,7 @@ class HandlerSelectView(View):
             if member: 
                 options.append(SelectOption(label=member.display_name, value=handler_id))
         
-        # ★修正点: optionsが1つでもある場合のみセレクトメニューを作成・追加する
+        # optionsが1つでもある場合のみセレクトメニューを作成・追加する (400 Bad Request対策)
         if options:
             self.select_menu = Select(
                 placeholder="削除したい対応者を選択",
@@ -318,7 +318,7 @@ class TicketInitialView(View):
         if not handler_ids:
             return await interaction.followup.send("❌ 現在、対応者は登録されていません。", ephemeral=True)
 
-        # ★修正点: HandlerSelectViewを生成し、アイテムがあるか確認 (400 Bad Request対策)
+        # HandlerSelectViewを生成し、アイテムがあるか確認 (400 Bad Request対策)
         handler_view = HandlerSelectView(self.bot, handler_ids, opener_id)
 
         if not handler_view.children:
@@ -429,7 +429,9 @@ class TicketCog(commands.Cog):
     async def on_ready(self):
         try:
             for guild in self.bot.guilds:
-                await self.bot.tree.sync(guild=guild)
+                # ギルド単位でのコマンド同期は時間がかかるため、通常はグローバル同期で十分
+                # await self.bot.tree.sync(guild=guild) 
+                pass
             await self.bot.tree.sync() 
             print("INFO: Slash commands synced successfully.")
         except Exception as e:
@@ -453,6 +455,7 @@ class TicketCog(commands.Cog):
             global ticket_data
             ticket_data = _load_json(TICKET_DATA_FILE)
             for channel_id, data in ticket_data.items():
+                # チャンネルがまだ存在する場合のみViewを復元
                 if self.bot.get_channel(int(channel_id)):
                      self.bot.add_view(TicketInitialView(self.bot, data["opener_id"], staff_role_id))
 
@@ -486,8 +489,8 @@ class TicketCog(commands.Cog):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
-        # ★修正点: deferを冒頭で一度だけ実行。Unknown interactionエラーを解消
-        await interaction.response.defer(ephemeral=True)
+        # ★修正済み: deferを非エフェメラル（公開）に変更し、パネルが必ず公開されるようにする
+        await interaction.response.defer() 
 
         guild_id = str(interaction.guild.id)
         
@@ -511,10 +514,10 @@ class TicketCog(commands.Cog):
         view = View(timeout=None) 
         view.add_item(TicketPanelButton(self.bot, label, custom_id=custom_id)) 
 
-        # followup.sendを使ってメッセージを送信 (ephemeral=Falseでチャンネルに表示)
+        # followup.sendを使ってメッセージを送信 (deferが公開のため、ephemeral=Falseは省略可だが、明示的に指定)
         await interaction.followup.send(embed=embed, view=view, ephemeral=False)
 
-        # 完了メッセージをfollowup.sendを使って送信
+        # 完了メッセージは管理者にのみ表示 (ephemeral=Trueを明示)
         await interaction.followup.send("✅ チケットパネルを正常に設置しました。Botを再起動してもボタンは機能し続けます。", ephemeral=True)
 
 
