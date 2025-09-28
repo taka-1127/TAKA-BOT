@@ -126,13 +126,13 @@ class HelpCog(commands.Cog):
         
         # --- 3ページ目：代行・チケット (4コマンド) ---
         p3 = discord.Embed(
-            title=f"📖 機能一覧 3/{total_pages}：チケット",
+            title=f"📖 機能一覧 3/{total_pages}：チケット・便利コマンド",
             description="購入・依頼用の個別チャンネルの管理コマンド",
             color=discord.Color.purple()
         )
-        p3.add_field(name="/ticket-panel-setup", value="チケット作成ボタンが設置されたパネルを作成します。", inline=False)
-        p3.add_field(name="/ticket-staff-add", value="チケット担当者（対応するスタッフ）を追加します。", inline=False)
-        p3.add_field(name="/ticket-staff-remove", value="チケット担当者から指定ユーザーを削除します。", inline=False)
+        p3.add_field(name="/ticket", value="チケット作成ボタンが設置されたパネルを作成します。", inline=False)
+        p3.add_field(name="/youtube-download", value="YouTubeの動画を指定したフォーマットでダウンロードします。", inline=False)
+        p3.add_field(name="/slot_create", value="一時的な個別チャンネル（スロット）を作成します。", inline=False)
         pages.append(p3)
 
         # --- 4ページ目：IPAパッチ (2コマンド) ---
@@ -155,8 +155,6 @@ class HelpCog(commands.Cog):
         p5.add_field(name="/backup-call", value="認証済みメンバーをサーバーに呼び戻す処理を実行します。", inline=False)
         p5.add_field(name="/backup-count", value="バックアップに登録されている認証済みメンバーの総数を表示します。", inline=False)
         p5.add_field(name="/bot-link", value="BOTが導入されているサーバー情報と招待リンクをEmbedで表示します。", inline=False)
-        p5.add_field(name="/youtube-download", value="YouTubeの動画を指定したフォーマットでダウンロードします。", inline=False)
-        p5.add_field(name="/slot_create", value="一時的な個別チャンネル（スロット）を作成します。", inline=False)
         pages.append(p5)
 
         # --- 6ページ目：LEVEL5 ID・その他ユーティリティ (4コマンド) ---
