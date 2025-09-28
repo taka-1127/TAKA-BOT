@@ -5,13 +5,11 @@ from discord import app_commands
 from PayPaython_mobile import PayPay
 import json
 import os
-import re # URLを検出するために追加
+import re 
+import asyncio # 🔥 修正: asyncio をインポート
 
 # token.jsonのパスを定義 (main.pyと同じ階層にあることを想定)
 TOKEN_PATH = "token.json"
-
-# PayPay認証URLのパターンを定義
-PAYPAY_URL_PATTERN = re.compile(r"https://www\.paypay\.ne\.jp/portal/oauth2")
 
 # ヘルパー関数: token.json の読み書き
 def load_tokens():
@@ -27,10 +25,20 @@ def save_tokens(tokens):
     with open(TOKEN_PATH, 'w') as f:
         json.dump(tokens, f, indent=2)
 
+# PayPay 初期化を同期的に実行するヘルパー関数
+def init_paypay_session(phone: str, password: str) -> PayPay:
+    """PayPayオブジェクトを初期化する（同期処理）"""
+    return PayPay(phone=phone, password=password)
+
+# PayPay 認証を同期的に実行するヘルパー関数
+def complete_paypay_login(paypay_session: PayPay, url_or_id: str):
+    """PayPayログインを完了する（同期処理）"""
+    return paypay_session.login(url_or_id)
+
+
 class LoginCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        # ログイン途中のセッションを一時保存する (key: user_id, value: PayPay object)
         self.user_sessions = {} 
 
     # /paypay-login スラッシュコマンド
@@ -40,19 +48,17 @@ class LoginCog(commands.Cog):
         password="PayPayパスワード"
     )
     async def paypay_login(self, interaction: discord.Interaction, phone: str, password: str):
-        # 応答を公開チャンネルに残さないように、Ephemeral（自分のみ）で待機
+        # 🔥 修正: 応答の defer を時間のかかる処理の前に移動
         await interaction.response.defer(ephemeral=True)
         
-        # 既にこのサーバーでセッションがある場合は警告
         if self.bot.user_sessions.get(interaction.guild_id):
             await interaction.followup.send("既にこのサーバーでPayPayにログインされています。", ephemeral=True)
             return
 
         try:
-            # ログイン処理開始
-            paypay = PayPay(phone=phone, password=password)
+            # 🔥 修正: 重いPayPay初期化を別スレッドで非同期実行 (await interaction.response.defer() の後)
+            paypay = await asyncio.to_thread(init_paypay_session, phone, password)
             
-            # ログイン開始したユーザーIDで一時セッションを管理
             self.user_sessions[interaction.user.id] = paypay 
             
             # リプライメンションとEphemeralメッセージでDM送信を指示
@@ -61,26 +67,25 @@ class LoginCog(commands.Cog):
                 ephemeral=True
             )
             
-            # DMへ誘導メッセージを送信 (DMがブロックされている場合は失敗するが無視)
+            # DMへ誘導メッセージを送信 
             try:
                 await interaction.user.send(
                     "🔐 **PayPay認証の最終ステップです**\n"
                     "PayPayから届いた認証URLを**開かずに**、ここにそのまま貼り付けて送信してください。"
                 )
             except discord.Forbidden:
-                pass # DMブロックの場合は何もしない
+                pass 
 
         except Exception as e:
-            await interaction.followup.send(f"❌ ログイン開始に失敗しました: {e}", ephemeral=True)
+            # エラー時も followup.send を使用
+            await interaction.followup.send(f"❌ ログイン開始に失敗しました: {type(e).__name__}: {e}", ephemeral=True)
             if interaction.user.id in self.user_sessions:
                 del self.user_sessions[interaction.user.id]
 
-    # DMでURLを検知し、ログインを完了させるロジック (main.pyで処理をLoginCogに引き渡す)
+    # DMでURLを検知し、ログインを完了させるロジック
     async def handle_dm_paypay_url(self, message: discord.Message, url_or_id: str):
-        """main.pyから呼び出され、DMで受け取ったURLで認証を完了させる"""
         user_id = message.author.id
         
-        # ログイン途中のセッションが存在するか確認
         if user_id not in self.user_sessions:
             await message.channel.send("❌ ログイン処理が開始されていません。サーバーで `/paypay-login` コマンドを実行してから、もう一度URLを送信してください。")
             return
@@ -88,22 +93,12 @@ class LoginCog(commands.Cog):
         paypay = self.user_sessions[user_id]
         
         try:
-            # 認証リンクまたはIDでログインを完了
-            paypay.login(url_or_id)
+            # 🔥 修正: 重いPayPayログイン完了処理を別スレッドで非同期実行
+            await asyncio.to_thread(complete_paypay_login, paypay, url_or_id)
 
             # --- token.json に保存するロジック ---
             tokens = load_tokens()
             
-            # DMのため、どのサーバーに紐づけるかが不明。
-            # 今回は「ユーザーID」をキーとしてPayPayトークンを保存するように変更します。
-            # (ただし、元のコードではBotの全サーバーで Paypaython_mobile を利用するために「サーバーID」をキーとしていたため、
-            #  ここでは元のロジックを再現するために、現在Botが参加している**最初のサーバーID**を暫定で利用します。)
-            
-            # ★注意: どのサーバーに紐づけるかの情報がDMからは取得できません。
-            # 暫定的に、Botが参加している任意のサーバーIDを使用します。
-            # 本来はユーザーがコマンドを実行したサーバーIDをどこかに保存しておくべきです。
-            
-            # 暫定措置: Botが参加しているサーバーの最初のIDを使用
             if self.bot.guilds:
                 guild_id_to_save = str(self.bot.guilds[0].id)
             else:
@@ -111,23 +106,17 @@ class LoginCog(commands.Cog):
                  del self.user_sessions[user_id]
                  return
                  
-            # サーバーIDをキーとしてアクセストークンを保存
             tokens[guild_id_to_save] = paypay.access_token
-
             save_tokens(tokens)
 
-            # Botのメインセッションに追加 (サーバーIDベースでBot全体のセッションに追加)
             self.bot.user_sessions[int(guild_id_to_save)] = paypay
             
-            # 処理完了メッセージ
             await message.channel.send("🎉 **PayPayログイン成功！** **BOTとPayPayアカウントがりんくされました**")
 
-            # 一時セッションを削除
             del self.user_sessions[user_id]
 
         except Exception as e:
-            # エラーが起きてもセッションは維持し、再送を促す
-            await message.channel.send(f"❌ ログインに失敗しました。認証リンクまたはIDが正しいか確認し、もう一度送信してください。\nエラー: {e}")
+            await message.channel.send(f"❌ ログインに失敗しました。認証リンクまたはIDが正しいか確認し、もう一度送信してください。\nエラー: {type(e).__name__}: {e}")
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(LoginCog(bot))
