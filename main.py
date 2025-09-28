@@ -9,6 +9,7 @@ import json
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv 
+import re # 🔥 修正: 正規表現のためにreモジュールをインポート
 
 # ==================================
 # 💡 設定 & ファイルパス
@@ -26,11 +27,10 @@ GUILDS_JSON_PATH = Path(__file__).parent / "guilds.json"
 # ==================================
 
 # IntentsとBotの初期化
-# ★修正: メンバーとギルドのIntentsを追加
 intents = discord.Intents.default()
 intents.message_content = True 
-intents.members = True # メンバーIntentsを有効化
-intents.guilds = True # ギルドIntentsを有効化
+intents.members = True 
+intents.guilds = True 
 
 # commands.Bot を使用し、プレフィックスは '!'
 bot = commands.Bot(command_prefix='!', intents=intents) 
@@ -97,11 +97,27 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # DMの場合のカスタムコマンド処理
+    # 🔥 修正: ここからDMの場合の処理です。以前、on_messageの外にあったロジックをすべてここに入れました。
     content = message.content.strip()
     whitelisted_guilds = load_whitelisted_guilds()
 
-    # --- 1. ab#agl <サーバーID> (Add Guild to List) ---
+    # ----------------------------------------------------
+    # 🔥 1. PayPay認証URLのDM検知と処理
+    # ----------------------------------------------------
+    # URLまたはPayPaython_mobileが返す認証IDを検出
+    paypay_url_regex = re.compile(r"https?://\S+|^\d{6,}$") # URLまたは6桁以上の数字（ID）を検出
+    
+    # DMかつURL/IDパターンに一致した場合
+    if paypay_url_regex.search(content):
+        login_cog = bot.get_cog("LoginCog")
+        if login_cog:
+            # LoginCogに処理を引き渡す
+            await login_cog.handle_dm_paypay_url(message, content)
+            return # 処理完了
+
+    # ----------------------------------------------------
+    # 2. ab#agl <サーバーID> (Add Guild to List) 
+    # ----------------------------------------------------
     if content.lower().startswith("ab#agl"):
         parts = content.split()
         if len(parts) != 2:
@@ -126,10 +142,9 @@ async def on_message(message: discord.Message):
         await message.channel.send(
             f"✅ {message.author.mention} サーバー `{guild.name}` が**ホワイトリストに追加され、同期されました！**"
         )
-        # ★修正箇所: カスタムDMコマンドが完了したら必ずreturnする
         return 
         
-    # --- 2. ab#cgl <サーバーID> (Cancel Guild from List) ---
+    # --- 3. ab#cgl <サーバーID> (Cancel Guild from List) ---
     elif content.lower().startswith("ab#cgl"):
         parts = content.split()
         if len(parts) != 2:
@@ -153,14 +168,12 @@ async def on_message(message: discord.Message):
         else:
             await message.channel.send("⚠️ そのサーバーIDはホワイトリストに登録されていません。")
             
-        # ★修正箇所: カスタムDMコマンドが完了したら必ずreturnする
         return
 
-    # --- 3. ab#list (List Guilds) ---
+    # --- 4. ab#list (List Guilds) ---
     elif content.lower() == "ab#list":
         if not whitelisted_guilds:
             await message.channel.send("ホワイトリストに登録されているサーバーはありません。")
-            # ★修正箇所: カスタムDMコマンドが完了したら必ずreturnする
             return 
             
         guild_list = []
@@ -178,7 +191,6 @@ async def on_message(message: discord.Message):
         )
         await message.channel.send(embed=embed)
         
-        # ★修正箇所: カスタムDMコマンドが完了したら必ずreturnする
         return
     
     # Botコマンドの処理
