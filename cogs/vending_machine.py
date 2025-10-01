@@ -1,375 +1,466 @@
+# cogs/vending_machine.py
+
 import discord
 from discord.ext import commands
-from discord import app_commands 
+from discord import app_commands
 import os
 import json
 from datetime import datetime
-from PayPaython_mobile import PayPay
-# ⬇️ 修正: .notification_utils は不要になったため、このインポートに統一
+import asyncio
+from typing import Optional, List
+# 🔥 修正: VendingMachineクラスとファイル操作をvm_managementからインポート
+from .vm_management import VendingMachine
+# 🔥 修正: 通知関数を purchase_notifications.py からインポート
 from .purchase_notifications import send_purchase_notification 
-import hashlib
-from typing import Optional # 🔥 修正: この行を追加
 
-# --- VendingMachine クラス (変更なし) ---
-class VendingMachine:
-    def __init__(self, name):
-        self.name = name
-        self.products = {}
-        
-    def add_product(self, product_name, price, description="", infinite_stock=False):
-        self.products[product_name] = {
-            "price": price,
-            "description": description,
-            "stock": [],
-            "infinite_stock": infinite_stock,
-            "infinite_item": ""
-        }
-    
-    def remove_product(self, product_name):
-        if product_name in self.products:
-            del self.products[product_name]
-    
-    def add_stock(self, product_name, items):
-        if product_name in self.products:
-            if isinstance(items, list):
-                self.products[product_name]["stock"].extend(items)
-            else:
-                self.products[product_name]["stock"].append(items)
-    
-    def get_stock_count(self, product_name):
-        if product_name in self.products:
-            if self.products[product_name].get("infinite_stock", False):
-                return "∞"
-            return len(self.products[product_name]["stock"])
-        return 0
-    
-    def purchase_item(self, product_name):
-        if product_name not in self.products:
-            return None
-            
-        product = self.products[product_name]
-        
-        if product.get("infinite_stock", False):
-            # 無限在庫の場合は設定されたアイテムを返す
-            return product.get("infinite_item", "在庫切れのアイテムが設定されていません。")
-        
-        if product["stock"]:
-            return product["stock"].pop(0) # 在庫から一つ取り出す
-        return None
+# --- UI Components (購入ロジックを含む) ---
 
-# --- VMCogBase (変更なし) ---
-class VMCogBase:
-    def _get_vm_filepath(self, guild_id, vm_name):
-        safe_vm_name = hashlib.sha256(vm_name.encode('utf-8')).hexdigest()[:16]
-        return os.path.join("vending_machines", str(guild_id), f"{safe_vm_name}.json")
-
-    def _save_vm(self, guild_id, vm: VendingMachine):
-        dir_path = os.path.join("vending_machines", str(guild_id))
-        os.makedirs(dir_path, exist_ok=True)
-        file_path = self._get_vm_filepath(guild_id, vm.name)
-        
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(vm.__dict__, f, indent=4, ensure_ascii=False)
-
-    def _load_vm(self, guild_id, vm_name) -> Optional[VendingMachine]:
-        file_path = self._get_vm_filepath(guild_id, vm_name)
-        if not os.path.exists(file_path):
-            return None
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            vm = VendingMachine(data.pop('name'))
-            vm.__dict__.update(data)
-            return vm
-        
-    def _get_all_vm_files(self, guild_id):
-        dir_path = os.path.join("vending_machines", str(guild_id))
-        if not os.path.exists(dir_path):
-            return []
-        return [f.replace('.json', '') for f in os.listdir(dir_path) if f.endswith('.json')]
-    
-    def _get_vm_by_id(self, guild_id, vm_id):
-        dir_path = os.path.join("vending_machines", str(guild_id))
-        if not os.path.exists(dir_path):
-            return None, None
-        
-        # ハッシュIDから元の名前を特定する必要があるため、全ファイルをチェック
-        for filename in os.listdir(dir_path):
-            if filename.endswith(".json") and filename.replace('.json', '') == vm_id:
-                file_path = os.path.join(dir_path, filename)
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    vm = VendingMachine(data.pop('name'))
-                    vm.__dict__.update(data)
-                    return vm, vm.name
-        return None, None
-
-# --- BuyView クラス ---
-class BuyView(discord.ui.View):
-    def __init__(self, bot: commands.Bot, guild_id: int, vm_name: str, vm_id: str, timeout=None):
-        super().__init__(timeout=timeout)
-        self.bot = bot
-        self.guild_id = guild_id
-        self.vm_name = vm_name
+class PurchaseButton(discord.ui.Button):
+    def __init__(self, vm_id: str, product_name: str, custom_id: str):
+        super().__init__(label="購入", style=discord.ButtonStyle.green, custom_id=custom_id)
         self.vm_id = vm_id
-        self.selected_product = None
-        
-        self.add_item(ProductSelect(self))
-        self.add_item(BuyButton(self))
-
-# --- ProductSelect クラス ---
-class ProductSelect(discord.ui.Select):
-    def __init__(self, parent_view: BuyView):
-        # optionsは空で初期化し、set_vmで実際のVM情報を使って更新
-        super().__init__(
-            custom_id=f"vm_select_{parent_view.vm_id}",
-            placeholder="商品を選択してください...", 
-            min_values=1, 
-            max_values=1
-        )
-        self.parent_view = parent_view
-        
+        self.product_name = product_name
+    
     async def callback(self, interaction: discord.Interaction):
-        # 選択された商品を親ビューに保存
-        self.parent_view.selected_product = self.values[0]
+        await interaction.response.defer(ephemeral=True, thinking=True)
         
-        # ボタンを有効化
-        for item in self.parent_view.children:
-            if isinstance(item, BuyButton):
-                item.disabled = False
-        
-        await interaction.response.edit_message(view=self.parent_view)
-
-# --- BuyButton クラス ---
-class BuyButton(discord.ui.Button):
-    def __init__(self, parent_view: BuyView):
-        super().__init__(
-            custom_id=f"vm_buy_{parent_view.vm_id}",
-            label="PayPayで購入", 
-            style=discord.ButtonStyle.primary, 
-            emoji="💰", 
-            disabled=True
-        )
-        self.parent_view = parent_view
-
-    async def callback(self, interaction: discord.Interaction):
-        # 処理が長いためdefer
-        await interaction.response.defer(ephemeral=True)
-        
-        vm_name = self.parent_view.vm_name
-        product_name = self.parent_view.selected_product
-
-        if not product_name:
-            await interaction.followup.send("❌ 購入する商品を選択してください。", ephemeral=True)
-            return
-            
-        # VMCogBaseのインスタンスを作成してVMをロード（ここでは仮にインスタンス化）
-        vm_cog = VMCogBase()
-        vm = vm_cog._load_vm(self.parent_view.guild_id, vm_name)
-
-        if not vm:
-            await interaction.followup.send(f"❌ 自動販売機`{vm_name}`が見つかりませんでした。", ephemeral=True)
-            return
-            
-        product_info = vm.products.get(product_name)
-        if not product_info:
-            await interaction.followup.send(f"❌ 商品`{product_name}`が見つかりませんでした。", ephemeral=True)
-            return
-
-        price = product_info['price']
-        stock_count = vm.get_stock_count(product_name)
-        
-        if stock_count == 0:
-            await interaction.followup.send(f"❌ 商品`{product_name}`は現在在庫切れです。", ephemeral=True)
-            return
-        
-        # PayPayインスタンスの取得
-        paypay: PayPay = self.parent_view.bot.user_sessions.get(interaction.guild_id)
-        if not paypay:
-            await interaction.followup.send("❌ PayPay情報がありません。管理者にご確認ください。", ephemeral=True)
-            return
-            
-        # 送金リンクの作成（同期処理と想定）
+        # VMのロードと購入処理
         try:
-            link_data = await asyncio.to_thread(paypay.create_link, amount=price)
-
-            embed = discord.Embed(
-                title=f"「{product_name}」購入確認",
-                description=f"✅ **{price}円**のPayPay送金リンクを発行しました。\n送金完了後、DMに商品が届きます。\n\n**⚠️注意: このリンクは一度限り有効です。**",
-                color=discord.Color.orange()
-            )
-            embed.add_field(name="送金リンク", value=f"[ここをクリックしてPayPayで支払う]({link_data.link})", inline=False)
-            embed.set_footer(text="購入後、DMをご確認ください。")
+            vm_data = VendingMachine.load_vm(self.vm_id)
+            vm = VendingMachine.from_dict(vm_data)
             
-            # 購入確認と送金リンクをephemeralで送信
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            # アイテムを購入 (在庫が減る場合はvm_management側で保存される)
+            item = vm.purchase_item(self.product_name)
             
-            # --- ここから支払いの監視ロジック ---
-            # 簡略化のため、元のコードに倣い監視ロジックは省略し、即時実行を仮定
+            if not item:
+                return await interaction.followup.send("❌ 在庫切れ、または商品が見つかりません。", ephemeral=True)
             
-            # 支払いが完了したと仮定し、アイテムを渡す
-            purchased_item = vm.purchase_item(product_name)
-            if purchased_item is None:
-                raise Exception("在庫の取り出しに失敗しました。")
-
-            # 在庫が減ったのでVMを再保存
-            vm_cog._save_vm(self.parent_view.guild_id, vm)
-            
-            # ユーザーにDMでアイテムを送る
-            dm_embed = discord.Embed(
-                title=f"🎁 {vm_name}からの購入商品",
-                description=f"**{product_name} ({price}円)**のご購入ありがとうございます。",
-                color=discord.Color.green(),
-                timestamp=datetime.now()
-            )
-            # アイテム内容をファイルとして送信することが望ましいが、元のコードに倣いそのまま送信
-            await interaction.user.send(embed=dm_embed)
-            await interaction.user.send(f"--- 商品内容 ---\n{purchased_item}\n--- 以上 ---")
-            
-            # 通知チャンネルに送信（非同期）
+            # 購入通知を送信 (この関数は purchase_notifications.py で定義されています)
             await send_purchase_notification(
-                self.parent_view.bot,
-                self.parent_view.guild_id,
-                interaction.user.id,
-                product_name,
-                price,
-                purchased_item
+                bot=interaction.client,
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                product_name=self.product_name,
+                price=vm.products[self.product_name]["price"],
+                item_content=item
             )
-
-        except Exception as e:
-            await interaction.followup.send(f"❌ 購入処理中にエラーが発生しました: {str(e)}", ephemeral=True)
-
-
-# --- コグの定義とコマンド (変更) ---
-from notification_utils import send_purchase_notification # ★ 修正
-
-class SetVendingMachineCog(VMCogBase, commands.Cog):
-    def __init__(self, bot):
-        self.bot = bot
-        # 永続View登録のためのセット (on_readyでの再登録を防ぐため)
-        self._registered_views = set()
-    
-    @app_commands.command( # 変更
-        name="vm-config-channel",
-        description="自動販売機の通知チャンネルを設定します。"
-    )
-    @app_commands.describe(
-        channel="購入通知を送信するテキストチャンネル"
-    )
-    async def config_vm_channel(self, interaction: discord.Interaction, channel: discord.TextChannel): # 変更: ctx -> interaction
-        if interaction.guild is None:
-            await interaction.response.send_message("このコマンドはサーバーでのみ実行可能です。", ephemeral=True)
-            return
             
+            # 購入者にDMでアイテムを送信
+            try:
+                await interaction.user.send(
+                    f"🎉 **ご購入ありがとうございます！**\n"
+                    f"商品: `{self.product_name}`\n"
+                    f"--- アイテム内容 ---\n"
+                    f"```{item}```"
+                )
+                await interaction.followup.send("✅ DMに商品を送りました。", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("❌ DMを送信できませんでした。DM設定を確認してください。", ephemeral=True)
+
+        except FileNotFoundError:
+            await interaction.followup.send("❌ この自販機は削除されたか、見つかりません。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 購入中にエラーが発生しました: {str(e)}", ephemeral=True)
+
+
+class ProductSelect(discord.ui.Select):
+    def __init__(self, vm_id: str, options: list):
+        super().__init__(
+            custom_id=f"vm_select_{vm_id}",
+            placeholder="商品を選択してください...",
+            options=options
+        )
+        self.vm_id = vm_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        selected_product_name = self.values[0]
+        
         try:
-            notification_manager = PurchaseNotificationManager(interaction.guild_id)
-            notification_manager.set_notification_channel(channel.id)
-            
-            await interaction.response.send_message( # 変更
-                f"✅ 通知チャンネルを **{channel.mention}** に設定しました。", 
-                ephemeral=True
-            )
-        except Exception as e:
-            await interaction.response.send_message(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
+            vm_data = VendingMachine.load_vm(self.vm_id)
+            vm = VendingMachine.from_dict(vm_data)
 
-class CreateVendingMachineCog(VMCogBase, commands.Cog):
+            # Viewを再構築
+            new_view = VendingMachineView(self.vm_id)
+            new_view.children = [c for c in new_view.children if not isinstance(c, PurchaseButton)]
+            
+            # 新しいボタンを作成してViewに追加
+            purchase_button = PurchaseButton(
+                vm_id=self.vm_id,
+                product_name=selected_product_name,
+                custom_id=f"purchase_{self.vm_id}_{selected_product_name}"
+            )
+            new_view.add_item(purchase_button)
+
+            # Embedを更新
+            embed = vm.create_embed(selected_product_name)
+
+            # メッセージを更新
+            await interaction.edit_original_response(embed=embed, view=new_view)
+            
+        except FileNotFoundError:
+            await interaction.followup.send("❌ この自販機は削除されたか、見つかりません。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 選択中にエラーが発生しました: {str(e)}", ephemeral=True)
+
+
+class VendingMachineView(discord.ui.View):
+    def __init__(self, vm_id: str):
+        super().__init__(timeout=None)
+        self.vm_id = vm_id
+        self.add_item(ProductSelect(vm_id, options=[]))
+        # 初期の購入ボタンは無効で追加しておく
+        self.add_item(PurchaseButton(vm_id, "default", f"purchase_{vm_id}_default_disabled"))
+
+
+# --- Cog: 自販機の表示 (/vmpost) ---
+class CreateVendingMachineCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-    
-    @app_commands.command( # 変更
-        name="vm-create",
-        description="新しい自動販売機を作成・設置します。"
-    )
-    @app_commands.describe(
-        vm_name="作成する自動販売機の名前 (例: デジタル商品VM)"
-    )
-    async def create_vm(self, interaction: discord.Interaction, vm_name: str): # 変更: ctx -> interaction
-        if interaction.guild is None:
-            await interaction.response.send_message("このコマンドはサーバーでのみ実行可能です。", ephemeral=True)
-            return
+        self._registered_views = set() 
 
-        file_path = self._get_vm_filepath(interaction.guild_id, vm_name)
-        
-        if os.path.exists(file_path):
-            await interaction.response.send_message(f"❌ 自動販売機`{vm_name}`は既に存在します。", ephemeral=True) # 変更
-            return
-
-        vm = VendingMachine(vm_name)
-        self._save_vm(interaction.guild_id, vm)
-
-        await interaction.response.send_message( # 変更
-            f"✅ 自動販売機`**{vm_name}**`を作成しました！ `/vm-add-product` で商品を追加し、`/vm-set` でチャンネルに設置できます。", 
-            ephemeral=True
-        )
-
-    @app_commands.command( # 変更
-        name="vm-set",
-        description="既存の自動販売機をチャンネルに設置します。"
+    @app_commands.command(
+        name="vmpost", # 🔥 修正コマンド名
+        description="指定した自動販売機をチャンネルに表示します。"
     )
-    @app_commands.describe(
-        vm_name="チャンネルに設置する自動販売機の名前"
-    )
-    async def set_vm(self, interaction: discord.Interaction, vm_name: str):
-        if interaction.guild is None:
-            await interaction.response.send_message("このコマンドはサーバーでのみ実行可能です。", ephemeral=True)
-            return
+    @app_commands.describe(vm_name="表示したい自動販売機の名前")
+    async def vmpost_command(self, interaction: discord.Interaction, vm_name: str):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
             
-        # 処理が長いためdefer
         await interaction.response.defer(ephemeral=True)
+        
+        try:
+            vm_id = VendingMachine.get_vm_id_by_name(interaction.guild_id, vm_name)
+            if not vm_id:
+                return await interaction.followup.send(f"❌ 自販機`{vm_name}`が見つかりません。", ephemeral=True)
+                
+            vm_data = VendingMachine.load_vm(vm_id)
+            vm = VendingMachine.from_dict(vm_data)
 
-        vm = self._load_vm(interaction.guild_id, vm_name)
-        if not vm:
-            await interaction.followup.send(f"❌ 自動販売機`{vm_name}`が見つかりませんでした。", ephemeral=True)
-            return
-        
-        # VM IDをハッシュで生成
-        vm_id = hashlib.sha256(vm_name.encode('utf-8')).hexdigest()[:16]
+            view = VendingMachineView(vm_id)
+            embed = vm.create_embed()
 
-        embed = discord.Embed(
-            title=f"🛒 {vm_name} 自動販売機",
-            description="購入したい商品をセレクトメニューから選択してください。",
-            color=discord.Color.dark_green()
-        )
-        
-        view = BuyView(self.bot, interaction.guild_id, vm_name, vm_id, timeout=None)
-        options = []
-        
-        for product_name, product_info in vm.products.items():
-            # 在庫表示の調整
-            if product_info.get("infinite_stock", False):
-                stock_display = "∞"
-            else:
-                stock_count = len(product_info["stock"])
+            # オプションの構築
+            options = []
+            for product_name, product_info in vm.products.items():
+                stock_count = "∞" if product_info.get("infinite_stock", False) else len(product_info.get("stock", []))
                 stock_display = f"{stock_count}個"
+                price = product_info["price"]
+                label = f"{product_name} - ¥{price}"
+                description = f"{price}円｜在庫: {stock_display} / {product_info['description'][:50]}"
+                
+                options.append(discord.SelectOption(
+                    label=label,
+                    value=product_name,
+                    description=description
+                ))
             
-            price = product_info["price"]
-            label = f"{product_name} - ¥{price}"
-            description = f"{price}円｜在庫: {stock_display}"
+            # セレクトコンポーネントにオプションを設定
+            select_component = next((c for c in view.children if isinstance(c, ProductSelect)), None)
+            if select_component:
+                select_component.options = options
             
-            options.append(discord.SelectOption(
-                label=label,
-                value=product_name,
-                description=description
-            ))
-        
-        # セレクトコンポーネントにオプションを設定
-        # ViewのchildrenからSelectを見つけてオプションをセット
-        select_component = next((c for c in view.children if isinstance(c, ProductSelect)), None)
-        if select_component:
-            select_component.options = options
-        
-        # ビューを登録（重複登録を防ぐ）
-        # SetVendingMachineCogは通知設定用なので、ここで登録フラグを管理するのは不自然だが、元のコードのロジックを維持
-        cog = self.bot.get_cog('SetVendingMachineCog')
-        if cog and vm_id not in cog._registered_views:
-            self.bot.add_view(view)
-            cog._registered_views.add(vm_id)
-            print(f"Registered new view for VM: {vm_name} (ID: {vm_id})")
-        
-        await interaction.followup.send(embed=embed, view=view) # deferしているためfollowup
+            # 永続Viewの登録
+            if vm_id not in self._registered_views:
+                self.bot.add_view(view)
+                self._registered_views.add(vm_id)
+            
+            await interaction.channel.send(embed=embed, view=view)
+            await interaction.followup.send(f"✅ 自販機`{vm_name}`をこのチャンネルに表示しました。", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
 
-async def setup(bot): # 変更: async setup
-    # AddProductToVMCogのクラス定義はvm_management.pyにあるため、ここではCreateVendingMachineCogとSetVendingMachineCogのみを登録
+
+# --- Cog: 商品の追加 (/vm_add_product) ---
+class AddProductToVMCog(commands.Cog):
+    # ...
+    @app_commands.command(
+        name="vm_add_product", # 🔥 修正コマンド名
+        description="自販機に新しい商品スロットを追加します。"
+    )
+    @app_commands.describe(
+        vm_name="自販機の名前",
+        product_name="商品名",
+        price="価格",
+        description="商品の説明"
+    )
+    async def vm_add_product_command(self, interaction: discord.Interaction, vm_name: str, product_name: str, price: int, description: str):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
+            
+        await interaction.response.defer(ephemeral=True)
+        
+        vm_id = VendingMachine.get_vm_id_by_name(interaction.guild_id, vm_name)
+        if not vm_id:
+            return await interaction.followup.send(f"❌ 自販機`{vm_name}`が見つかりません。", ephemeral=True)
+
+        try:
+            vm_data = VendingMachine.load_vm(vm_id)
+            # 商品データを直接更新
+            vm_data["products"][product_name] = {
+                "price": price,
+                "description": description,
+                "stock": [],
+                "infinite_stock": False,
+                "infinite_item": ""
+            }
+            
+            # VendingMachineクラスのsave_vmを再利用する
+            vm = VendingMachine.from_dict(vm_data)
+            vm.save_vm()
+                
+            await interaction.followup.send(f"✅ 自販機`{vm_name}`に商品`{product_name}` (¥{price}) を追加しました。", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
+
+
+async def setup(bot: commands.Bot):
     await bot.add_cog(CreateVendingMachineCog(bot))
-    # AddProductToVMCog(bot) は vm_management.py の setup で行われる想定
-    await bot.add_cog(SetVendingMachineCog(bot)) # 変更
+    await bot.add_cog(AddProductToVMCog(bot))
+    # (永続Viewの再ロードロジックもここに追加されます)import discord
+from discord.ext import commands
+from discord import app_commands
+import os
+import json
+import asyncio
+from typing import Optional, List, Dict, Any
+# vm_management.pyからコアクラスと通知関数をインポート
+from .vm_management import VendingMachine
+from .purchase_notifications import send_purchase_notification 
+
+# --- UI Components (購入ロジックを含む) ---
+
+class PurchaseButton(discord.ui.Button):
+    def __init__(self, vm_id: str, product_name: str, custom_id: str):
+        super().__init__(label=f"『{product_name}』を購入", style=discord.ButtonStyle.green, custom_id=custom_id)
+        self.vm_id = vm_id
+        self.product_name = product_name
+    
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        
+        # Paypay連携ロジックなどが入る場合もありますが、ここでは直接購入処理を実行します
+        
+        try:
+            vm_data = VendingMachine.load_vm(self.vm_id)
+            vm = VendingMachine.from_dict(vm_data)
+            
+            # アイテムを購入 (在庫が減る場合はvm_management側で保存される)
+            item = vm.purchase_item(self.product_name)
+            
+            if not item:
+                return await interaction.followup.send(f"❌ 商品`{self.product_name}`は現在、在庫切れです。", ephemeral=True)
+            
+            # 購入通知を送信
+            await send_purchase_notification(
+                bot=interaction.client,
+                guild_id=interaction.guild_id,
+                user_id=interaction.user.id,
+                product_name=self.product_name,
+                price=vm.products[self.product_name]["price"],
+                item_content=item
+            )
+            
+            # 購入者にDMでアイテムを送信
+            try:
+                await interaction.user.send(
+                    f"🎉 **ご購入ありがとうございます！**\n"
+                    f"自販機: `{vm.name}`\n"
+                    f"商品: `{self.product_name}`\n"
+                    f"--- アイテム内容 ---\n"
+                    f"```{item}```"
+                )
+                await interaction.followup.send("✅ DMに商品を送りました。ご確認ください。", ephemeral=True)
+            except discord.Forbidden:
+                await interaction.followup.send("❌ DMを送信できませんでした。あなたのDM設定（サーバーメンバーからのDM）を確認してください。", ephemeral=True)
+
+        except FileNotFoundError:
+            await interaction.followup.send("❌ この自販機は削除されたか、見つかりません。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 購入中に予期せぬエラーが発生しました: {str(e)}", ephemeral=True)
+
+
+class ProductSelect(discord.ui.Select):
+    def __init__(self, vm_id: str, options: list):
+        super().__init__(
+            custom_id=f"vm_select_{vm_id}",
+            placeholder="商品を選択してください...",
+            options=options
+        )
+        self.vm_id = vm_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        selected_product_name = self.values[0]
+        
+        try:
+            vm_data = VendingMachine.load_vm(self.vm_id)
+            vm = VendingMachine.from_dict(vm_data)
+
+            # Viewを再構築
+            new_view = VendingMachineView(self.vm_id)
+            # 既存のSelect以外のコンポーネントをクリア
+            new_view.children = [c for c in new_view.children if not isinstance(c, PurchaseButton)]
+            
+            # 新しいボタンを作成してViewに追加
+            purchase_button = PurchaseButton(
+                vm_id=self.vm_id,
+                product_name=selected_product_name,
+                custom_id=f"purchase_{self.vm_id}_{selected_product_name}"
+            )
+            new_view.add_item(purchase_button)
+            
+            # Selectコンポーネントにオプションを再設定（選択状態を維持）
+            select_component = next((c for c in new_view.children if isinstance(c, ProductSelect)), None)
+            if select_component:
+                 select_component.options = self.options
+                 select_component.default_values = [discord.SelectOption(label=selected_product_name, value=selected_product_name)]
+
+            # Embedを更新
+            embed = vm.create_embed(selected_product_name)
+
+            # メッセージを更新
+            await interaction.edit_original_response(embed=embed, view=new_view)
+            
+        except FileNotFoundError:
+            await interaction.followup.send("❌ この自販機は削除されたか、見つかりません。", ephemeral=True)
+        except Exception as e:
+            await interaction.followup.send(f"❌ 選択中にエラーが発生しました: {str(e)}", ephemeral=True)
+
+
+class VendingMachineView(discord.ui.View):
+    def __init__(self, vm_id: str):
+        super().__init__(timeout=None)
+        self.vm_id = vm_id
+        # Selectは初期化時にオプションなしで追加
+        self.add_item(ProductSelect(vm_id, options=[]))
+        # 初期の購入ボタンは仮で追加しておく (Selectで選択されたら置き換えられる)
+        self.add_item(PurchaseButton(vm_id, "商品を選択してください", f"purchase_{vm_id}_default_disabled"))
+
+
+# --- Cog: 自販機の表示 (/vmpost) ---
+class CreateVendingMachineCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        # 永続Viewの登録管理用（gファイルに倣い、このCogで管理）
+        self._registered_views: set = set() 
+
+    @app_commands.command(
+        name="vmpost", 
+        description="指定した自動販売機をチャンネルに表示します（管理者専用）。"
+    )
+    @app_commands.describe(vm_name="表示したい自動販売機の名前")
+    async def vmpost_command(self, interaction: discord.Interaction, vm_name: str):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
+            
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            vm_id = VendingMachine.get_vm_id_by_name(interaction.guild_id, vm_name)
+            if not vm_id:
+                return await interaction.followup.send(f"❌ 自販機`{vm_name}`が見つかりません。", ephemeral=True)
+                
+            vm_data = VendingMachine.load_vm(vm_id)
+            vm = VendingMachine.from_dict(vm_data)
+
+            view = VendingMachineView(vm_id)
+            embed = vm.create_embed()
+
+            # オプションの構築
+            options = []
+            for product_name, product_info in vm.products.items():
+                stock_count = "∞" if product_info.get("infinite_stock", False) else len(product_info.get("stock", []))
+                stock_display = f"{stock_count}個"
+                price = product_info["price"]
+                label = f"{product_name} - ¥{price:,}"
+                description = f"{price:,}円｜在庫: {stock_display} / {product_info['description'][:50]}"
+                
+                options.append(discord.SelectOption(
+                    label=label,
+                    value=product_name,
+                    description=description
+                ))
+            
+            # セレクトコンポーネントにオプションを設定
+            select_component = next((c for c in view.children if isinstance(c, ProductSelect)), None)
+            if select_component:
+                select_component.options = options
+            
+            # 永続Viewの登録
+            if vm_id not in self._registered_views:
+                # Bot起動時に永続Viewのリスナーが呼ばれるため、ここでは重複登録を避けるためセットに追加する処理のみ
+                # 実際にはsetupフックでボットにViewを add_view する必要があります
+                pass 
+            
+            # 初期ボタンを無効化
+            initial_button = next((c for c in view.children if isinstance(c, PurchaseButton)), None)
+            if initial_button:
+                initial_button.disabled = True
+
+            await interaction.channel.send(embed=embed, view=view)
+            await interaction.followup.send(f"✅ 自販機`{vm_name}`をこのチャンネルに表示しました。", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
+
+
+# --- Cog: 商品の追加 (/vm_add_product) ---
+class AddProductToVMCog(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(
+        name="vm_add_product", 
+        description="自販機に新しい商品スロットを追加します（管理者専用）。"
+    )
+    @app_commands.describe(
+        vm_name="自販機の名前",
+        product_name="商品名",
+        price="価格",
+        description="商品の説明"
+    )
+    async def vm_add_product_command(self, interaction: discord.Interaction, vm_name: str, product_name: str, price: int, description: str):
+        if not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
+            
+        await interaction.response.defer(ephemeral=True)
+        
+        vm_id = VendingMachine.get_vm_id_by_name(interaction.guild_id, vm_name)
+        if not vm_id:
+            return await interaction.followup.send(f"❌ 自販機`{vm_name}`が見つかりません。", ephemeral=True)
+
+        try:
+            vm_data = VendingMachine.load_vm(vm_id)
+            vm = VendingMachine.from_dict(vm_data)
+            
+            if product_name in vm.products:
+                return await interaction.followup.send(f"❌ 商品`{product_name}`は既に存在します。在庫を追加する場合は別のコマンドを使ってください。", ephemeral=True)
+
+            # 商品データを更新
+            vm.products[product_name] = {
+                "price": price,
+                "description": description,
+                "stock": [],
+                "infinite_stock": False,
+                "infinite_item": ""
+            }
+            vm.save_vm()
+                
+            await interaction.followup.send(f"✅ 自販機`{vm_name}`に商品`{product_name}` (¥{price:,}) を追加しました。", ephemeral=True)
+            
+        except Exception as e:
+            await interaction.followup.send(f"❌ エラーが発生しました: {str(e)}", ephemeral=True)
+
+
+# =========================================================
+# 3. Setup
+# =========================================================
+async def setup(bot: commands.Bot):
+    await bot.add_cog(CreateVendingMachineCog(bot))
+    await bot.add_cog(AddProductToVMCog(bot))
+    # Botの再起動時に永続Viewを再登録するロジックもここに追加します
+    # (例: bot.add_view(VendingMachineView(vm_id)) のような処理)

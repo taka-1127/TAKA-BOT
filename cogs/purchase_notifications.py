@@ -1,5 +1,3 @@
-# cogs/purchase_notifications.py の完全修正版
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -10,13 +8,12 @@ from typing import Optional
 
 # ===============================================
 # 1. PurchaseNotificationManager クラス (設定ファイルの読み書き)
-#    (元: notification_utils.py の内容を統合)
 # ===============================================
 class PurchaseNotificationManager:
     """通知チャンネルの設定を管理するクラス"""
     def __init__(self, guild_id):
         self.guild_id = str(guild_id)
-        # 設定を保存するディレクトリ。例: notification_config/123456789...
+        # 設定を保存するディレクトリ
         self.config_dir = os.path.join("notification_config", self.guild_id)
         self.config_file = os.path.join(self.config_dir, "config.json")
         
@@ -44,19 +41,24 @@ class PurchaseNotificationManager:
                 pass
         return {}
     
-    def _save_config(self, config: dict):
+    def _save_config(self, config):
         """設定ファイルに保存"""
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(config, f, ensure_ascii=False, indent=4)
 
+
 # ===============================================
-# 2. send_purchase_notification 関数 (通知ロジック)
-#    (元: notification_utils.py の内容を統合)
+# 2. send_purchase_notification 関数 (通知送信のユーティリティ)
 # ===============================================
-async def send_purchase_notification(bot: commands.Bot, guild_id: int, user_id: int, product_name: str, price: int, item_content: str):
-    """
-    購入が発生した際に、設定されたチャンネルに通知を送信する
-    """
+async def send_purchase_notification(
+    bot: commands.Bot, 
+    guild_id: int, 
+    user_id: int, 
+    product_name: str, 
+    price: int, 
+    item_content: str
+):
+    """購入通知を通知チャンネルに送信する"""
     notification_manager = PurchaseNotificationManager(guild_id)
     channel_id = notification_manager.get_notification_channel_id()
     
@@ -66,16 +68,15 @@ async def send_purchase_notification(bot: commands.Bot, guild_id: int, user_id: 
     channel = bot.get_channel(int(channel_id))
     if not channel:
         return  # チャンネルが見つからない場合は何もしない
-    
+
     guild = bot.get_guild(int(guild_id))
-    # ユーザーが見つからない場合もあるため、fetch_memberではなくget_memberでキャッシュから取得
     user = guild.get_member(int(user_id)) if guild else None
     user_mention = user.mention if user else f"<@{user_id}>"
     
     # 購入通知埋め込みを作成
     embed = discord.Embed(
-        title="✅ 自動販売機 購入通知",
-        description=f"DMに商品が届きます。ご購入ありがとうございました。",
+        title="自動販売機",
+        description=f"商品が購入されました。購入者にはDMでアイテムが送られます。",
         color=discord.Color.green(),
         timestamp=datetime.now()
     )
@@ -84,47 +85,45 @@ async def send_purchase_notification(bot: commands.Bot, guild_id: int, user_id: 
     embed.add_field(name="購入金額", value=f"```{price:,}円```", inline=False)
     embed.add_field(name="商品", value=f"```{product_name}```", inline=False)
     
-    # アイテム内容が長すぎる場合は省略
+    # アイテム内容のプレビュー
     if len(item_content) > 100:
         item_preview = item_content[:97] + "..."
     else:
         item_preview = item_content
 
     embed.set_footer(
-        text=f"内容プレビュー: {item_preview}", 
+        text="Made by LT",
         icon_url=bot.user.avatar.url if bot.user.avatar else discord.Embed.Empty
     )
     
     try:
         await channel.send(embed=embed)
     except discord.Forbidden:
-        # チャンネルに書き込み権限がない場合
         print(f"ERROR: チャンネルID {channel_id} に通知を送信できませんでした (権限不足)。")
     except Exception as e:
         print(f"ERROR: 通知送信中に予期せぬエラーが発生しました: {e}")
 
+
 # ===============================================
-# 3. SetVendingMachineCog クラス (スラッシュコマンド)
+# 3. SetNotificationChannelCog クラス (通知設定コマンド)
+#    - コマンド名: /vmnote_set
 # ===============================================
 class SetNotificationChannelCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @app_commands.command(
-        name="set-notification-channel",
+        name="vmnote_set", 
         description="自動販売機の購入通知を送るチャンネルを設定します（管理者専用）。"
     )
-    @app_commands.describe(
-        channel="通知を送りたいテキストチャンネル"
-    )
-    async def set_notification_channel_command(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    @app_commands.describe(channel="通知を送りたいテキストチャンネル")
+    async def vmnote_set_command(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not interaction.user.guild_permissions.administrator:
             return await interaction.response.send_message("❌ このコマンドは管理者のみ実行できます。", ephemeral=True)
 
         await interaction.response.defer(ephemeral=True)
 
         try:
-            # 統合された PurchaseNotificationManager を使用
             manager = PurchaseNotificationManager(interaction.guild_id)
             manager.set_notification_channel(channel.id)
             
@@ -137,5 +136,4 @@ class SetNotificationChannelCog(commands.Cog):
 
 
 async def setup(bot: commands.Bot):
-    """コグをボットにロードする関数"""
     await bot.add_cog(SetNotificationChannelCog(bot))
