@@ -9,7 +9,7 @@ import json
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv 
-import re # 🔥 修正: 正規表現のためにreモジュールをインポート
+# import re # 🔥 削除: DMでのPayPay URL検知はLoginCogに移管したため不要
 
 # ==================================
 # 💡 設定 & ファイルパス
@@ -67,7 +67,8 @@ if os.path.exists(token_path):
             try:
                 guild_id = int(guild_id_str)
                 paypay = PayPay(access_token=access_token)
-                bot.user_sessions[guild_id] = paypay
+                # 🔥 修正: 永続セッションを bot.user_sessions にロード
+                bot.user_sessions[guild_id] = paypay 
                 print(f"INFO: PayPay session loaded for Guild ID {guild_id}.")
             except ValueError:
                 print(f"WARNING: Invalid guild ID in token.json: {guild_id_str}")
@@ -97,27 +98,11 @@ async def on_message(message: discord.Message):
         await bot.process_commands(message)
         return
 
-    # 🔥 修正: ここからDMの場合の処理です。以前、on_messageの外にあったロジックをすべてここに入れました。
+    # DMの場合のカスタムコマンド処理
     content = message.content.strip()
     whitelisted_guilds = load_whitelisted_guilds()
 
-    # ----------------------------------------------------
-    # 🔥 1. PayPay認証URLのDM検知と処理
-    # ----------------------------------------------------
-    # URLまたはPayPaython_mobileが返す認証IDを検出
-    paypay_url_regex = re.compile(r"https?://\S+|^\d{6,}$") # URLまたは6桁以上の数字（ID）を検出
-    
-    # DMかつURL/IDパターンに一致した場合
-    if paypay_url_regex.search(content):
-        login_cog = bot.get_cog("LoginCog")
-        if login_cog:
-            # LoginCogに処理を引き渡す
-            await login_cog.handle_dm_paypay_url(message, content)
-            return # 処理完了
-
-    # ----------------------------------------------------
-    # 2. ab#agl <サーバーID> (Add Guild to List) 
-    # ----------------------------------------------------
+    # --- 1. ab#agl <サーバーID> (Add Guild to List) ---
     if content.lower().startswith("ab#agl"):
         parts = content.split()
         if len(parts) != 2:
@@ -144,7 +129,7 @@ async def on_message(message: discord.Message):
         )
         return 
         
-    # --- 3. ab#cgl <サーバーID> (Cancel Guild from List) ---
+    # --- 2. ab#cgl <サーバーID> (Cancel Guild from List) ---
     elif content.lower().startswith("ab#cgl"):
         parts = content.split()
         if len(parts) != 2:
@@ -170,7 +155,7 @@ async def on_message(message: discord.Message):
             
         return
 
-    # --- 4. ab#list (List Guilds) ---
+    # --- 3. ab#list (List Guilds) ---
     elif content.lower() == "ab#list":
         if not whitelisted_guilds:
             await message.channel.send("ホワイトリストに登録されているサーバーはありません。")
